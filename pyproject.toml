@@ -1,10 +1,10 @@
 [project]
 name = "ultima3d"
 version = "0.4.0"
-description = "Agentic 3D asset generator MCP: AI-directed procedural synthesis in Blender, game-ready output."
+description = "Ultima3D: unified agentic 3D MCP server — procedural asset compiler, live Blender GUI tools, Godot editor bridge."
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = ["mcp>=2.0"]
+dependencies = ["mcp>=2.0", "httpx>=0.27.0"]
 
 [project.scripts]
 ultima3d = "ultima3d.server:cli"

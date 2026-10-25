@@ -1,8 +1,9 @@
 # ultima3d (Project Ultima3D) — Agentic 3D Asset Generator MCP
 
 AI-directed procedural 3D synthesis: the LLM owns **intent and visual judgement**, the
-Blender worker owns **mechanics and verification**. Exposes 15 high-level MCP tools, not
-hundreds of Blender buttons.
+Blender worker owns **mechanics and verification**. One `ultima3d` MCP server exposes
+56 tools: 15 procedural asset tools, 32 live-Blender GUI tools, 6 Godot editor tools,
+and 3 pipeline tools — plus the `asset_creation_strategy` prompt.
 
 **Milestones.** v0.1 — deterministic procedural asset compiler proven.
 v0.2 — trustworthy game-asset compiler: measurements are asset-wide, budgets
@@ -260,40 +261,26 @@ validate_asset()
 finalize_asset(name="medieval_mailbox")
 ```
 
-## Cloning
+## Layout
 
-`blender_mcp` is a git submodule pointing at our fork of
-[mcp-for-blender](https://github.com/ahujasid/mcp-for-blender) — so a plain
-`git clone` gives you an empty folder:
-
-```bash
-git clone --recurse-submodules https://github.com/buffbot88/Ultima3D.git
-cd Ultima3D
+```text
+ultima3d/
+  server.py        procedural asset tools (background Blender worker) + pipeline
+  registry.py      the single shared MCPServer("ultima3d")
+  blender_worker.py  geometry compiler run under blender --background
+  live/            live-Blender GUI tools (ported from mcp-for-blender to mcp 2.x)
+  live/bundled/    Blender addon installed into the user's Blender GUI
+  godot/           Godot bridge client + godot_* tools
+  godot/addon/     Godot editor plugin (install into your project)
+  godot/captures/  Godot viewport screenshots
+  agentic.py       pipeline helpers (status fan-out, export picker, review gate)
 ```
 
-If you already cloned without the flag:
+A plain `git clone` is all you need — no submodules.
 
-```bash
-git submodule update --init --recursive
-```
-
-### Following upstream blender_mcp
-
-The submodule's `local-changes` branch sits on top of upstream history with our local
-adaptations (stubbed telemetry, `image_files` for hosts that can't render image blocks).
-To pull in upstream changes:
-
-```bash
-cd blender_mcp
-git remote add upstream https://github.com/ahujasid/mcp-for-blender.git  # once
-git fetch upstream
-git checkout local-changes
-git merge upstream/main          # resolve conflicts, then run blender_mcp's tests
-cd ..
-git add blender_mcp              # record the new submodule commit
-```
-
-`godot_mcp` is not a submodule — it is regular tracked code and needs no special handling.
+The live tools were ported from
+[mcp-for-blender](https://github.com/ahujasid/mcp-for-blender) to `mcp>=2.0`
+(`FastMCP` → `MCPServer`); upstream merges are manual from here.
 
 ## Run
 
@@ -311,8 +298,30 @@ Config (env): `ULTIMA3D_BLENDER` (Blender executable), `ULTIMA3D_OUT` (output di
 `ULTIMA3D_CALL_TIMEOUT` (per-call worker deadline in seconds, default 600 — a hung
 worker is killed past it, losing its scene state).
 
-Requires **Blender 5.2 LTS** and **mcp >= 2.0**. Note that `mcp` 2.x renamed `FastMCP` to
-`MCPServer`; `mcp.server.fastmcp` deliberately does not resolve.
+Requires **Blender 5.2 LTS**, **mcp >= 2.0**, and **httpx >= 0.27.0**
+(telemetry uploads). Godot bridge needs Godot 4.x with the bundled editor plugin enabled.
+
+## Backends
+
+One MCP server, three backends — all registered on the single `ultima3d` registry
+(`ultima3d/registry.py`), all degrading gracefully when their editor is offline:
+
+- **Procedural** (`create_3d`, `refine_asset`, `render_asset`, `validate_asset`,
+  `finalize_asset`, …) — background Blender worker, deterministic + measurable.
+- **Live Blender** (`get_scene_info`, `execute_blender_code`,
+  `get_viewport_screenshot`, asset libraries, …) — drives the user's open Blender
+  GUI over `BLENDER_HOST:BLENDER_PORT` (default `localhost:9876`). Install the addon
+  from `ultima3d/live/bundled/addon.py`, then enable it in Blender preferences.
+- **Godot** (`godot_status`, `godot_scene_tree`, `godot_run_project`,
+  `godot_stop_project`, `godot_debug_output`, `godot_screenshot`) — drives the
+  running Godot editor over `GODOT_MCP_URL` (default `http://127.0.0.1:8765/mcp`).
+  Copy `ultima3d/godot/addon/` into your Godot project's `addons/` folder and enable
+  **Ultima3D Godot Bridge** under Project Settings → Plugins.
+- **Pipeline** (`ultima3d_status_all`, `export_asset_to_godot`, `review_asset_loop`)
+  — status fan-out, GLB handoff to a Godot project, validate+critic review gate.
+
+Test: `python tests/unified_test.py` (needs `mcp>=2.0` + `httpx` installed;
+no Blender/Godot required).
 
 ## Freebuff / MCP client wiring
 

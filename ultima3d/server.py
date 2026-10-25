@@ -1,9 +1,8 @@
-"""ultima3d — agentic 3D asset generator MCP server.
+"""Ultima3D — unified agentic 3D MCP server.
 
-Exposes 15 high-level tools (create_3d, refine_asset, render_asset,
-validate_asset, finalize_asset, ...) instead of hundreds of Blender buttons.
-The Blender worker (ultima3d/blender_worker.py) owns the mechanics; the LLM
-owns intent and visual judgement.
+One server, three backends: procedural asset compiler (background Blender
+worker), live Blender GUI tools (vendored under ultima3d.live), and Godot
+editor tools (ultima3d.godot). Backends degrade gracefully offline.
 
 Config via env:
     ULTIMA3D_BLENDER   path to blender executable
@@ -12,6 +11,9 @@ Config via env:
     ULTIMA3D_CALL_TIMEOUT
                       per-call deadline in seconds for worker responses
                       (default: 600); a hung worker is killed past it
+    GODOT_MCP_URL      Godot bridge URL (default: http://127.0.0.1:8765/mcp)
+    BLENDER_HOST/BLENDER_PORT
+                      live-Blender GUI addon address (default: localhost:9876)
 """
 
 from __future__ import annotations
@@ -26,9 +28,14 @@ import threading
 import time
 from pathlib import Path
 
-from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.utilities.types import Image
+
+from .registry import mcp
+
+# Side-effect imports: register live-Blender + Godot tools on the same server.
+from .live import server as _live_server  # noqa: F401
+from .godot import tools as _godot_tools  # noqa: F401
 
 _HERE = Path(__file__).resolve().parent
 WORKER = _HERE / "blender_worker.py"
@@ -39,9 +46,6 @@ BLENDER = os.environ.get(
 )
 OUT_DIR = Path(os.environ.get("ULTIMA3D_OUT", Path.cwd() / "output"))
 CALL_TIMEOUT = float(os.environ.get("ULTIMA3D_CALL_TIMEOUT", "600"))
-
-mcp = MCPServer("ultima3d")
-
 
 # ---------------------------------------------------------------------------
 # Worker process management: persistent blender --background, JSON lines.
@@ -342,6 +346,69 @@ def reset_scene() -> str:
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Agentic pipeline over the three backends.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def ultima3d_status_all() -> str:
+    """One snapshot: worker, Godot bridge, live-Blender GUI."""
+    from . import agentic
+    from .godot.bridge import call as godot_call
+    try:
+        ping = _w.call("ping")
+        ultima = {"ok": True, "blender": ping.get("blender"), "worker": "running"}
+    except Exception as e:
+        ultima = {"ok": False, "error": str(e)}
+    try:
+        godot = godot_call("status")
+    except Exception as e:
+        godot = {"ok": False, "error": str(e)}
+    try:
+        from .live.server import get_blender_connection
+
+        conn = get_blender_connection()
+        live = {"ok": True, "host": conn.host, "port": conn.port}
+    except Exception as e:
+        live = {"ok": False, "error": str(e)}
+    return json.dumps(agentic.combine_status(ultima, godot, live))
+
+
+@mcp.tool()
+def export_asset_to_godot(name: str | None = None, dest_dir: str | None = None) -> str:
+    """Copy the finalized GLB into a Godot project folder for import."""
+    import shutil
+    dest = Path(dest_dir) if dest_dir else _out("godot_import")
+    dest.mkdir(parents=True, exist_ok=True)
+    src_name = name
+    if not src_name:
+        try:
+            src_name = _w.call("inspect", {}).get("name", "asset")
+        except Exception:
+            src_name = "asset"
+    src = _out("export") / f"{src_name}.glb"
+    if not src.is_file():
+        raise ToolError(f"no finalized GLB at {src}; run finalize_asset(name={src_name!r}) first")
+    out = dest / src.name
+    shutil.copy2(src, out)
+    return json.dumps({"ok": True, "src": str(src), "dest": str(out),
+                       "note": "import it in Godot (auto .godot import on scan); no .tscn is created"})
+
+
+@mcp.tool()
+def review_asset_loop(triangle_budget: int = 8000, assertions: list | None = None,
+                      materials: dict | None = None) -> str:
+    """Run validate (+ optional critic) and report done vs next fixes."""
+    from . import agentic
+    validation = _w.call("validate", {"triangle_budget": triangle_budget})
+    assertions_json = None
+    if assertions:
+        assertions_json = json.dumps(_w.call("check_assertions", {
+            "assertions": assertions, "materials": materials}))
+    return json.dumps(agentic.review_gate(json.dumps(validation), assertions_json))
 
 
 def cli():
