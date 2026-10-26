@@ -127,11 +127,147 @@ def _set_principled(mat, base_color=None, roughness=None, metallic=None, emissio
     return mat
 
 
-def _simple_mat(name, base_color, roughness=0.6, metallic=0.0):
+def _simple_mat(name, base_color, roughness=0.6, metallic=0.0, texture=None,
+                tex_scale=3.0, tex_blend=0.5, tex_seed=0):
+    """Flat PBR, or a procedural preset when texture names one."""
     mat = bpy.data.materials.get(name)
     if mat is None:
         mat = bpy.data.materials.new(name)
-    return _set_principled(mat, base_color, roughness, metallic)
+    _set_principled(mat, base_color, roughness, metallic)
+    if texture:
+        _apply_procedural(mat, texture, base_color, tex_scale, tex_blend, tex_seed)
+    return mat
+
+
+# Preset names accepted by the material spec's `texture` key. Unknown names
+# fall back to flat color with a warning, never a crashed build.
+TEXTURE_PRESETS = ("wood_grain", "bark", "stone", "mossy", "grass_blend",
+                   "worn_metal")
+
+
+def _mat_fresh(mat):
+    """Keep Principled + Output, drop every other node for a deterministic rebuild."""
+    mat.use_nodes = True
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    princ = nodes.get("Principled BSDF") or nodes.new("ShaderNodeBsdfPrincipled")
+    out = nodes.get("Material Output") or nodes.new("ShaderNodeOutputMaterial")
+    for n in list(nodes):
+        if n not in (princ, out):
+            nodes.remove(n)
+    links.clear() if hasattr(links, "clear") else None
+    for l in list(links):
+        links.remove(l)
+    links.new(princ.outputs.get("BSDF"), out.inputs.get("Surface"))
+    return nodes, links, princ
+
+
+def _tex_chain(mat, tex_node_type, seed=0, scale=3.0):
+    """TexCoord -> Mapping -> texture node; seed offsets mapping for variation."""
+    nodes, links, princ = _mat_fresh(mat)
+    tex_coord = nodes.new("ShaderNodeTexCoord")
+    mapping = nodes.new("ShaderNodeMapping")
+    mapping.inputs["Scale"].default_value = (float(scale),) * 3
+    # deterministic per-seed offset (noise/voronoi have no stable seed socket)
+    mapping.inputs["Location"].default_value = (float(seed) * 3.7 % 10,
+                                                  float(seed) * 7.3 % 10, 0.0)
+    tex = nodes.new(tex_node_type)
+    links.new(tex_coord.outputs.get("Generated"), mapping.inputs.get("Vector"))
+    links.new(mapping.outputs.get("Vector"), tex.inputs.get("Vector"))
+    return nodes, links, princ, tex
+
+
+def _ramp(nodes, links, fac_out, c0, c1, pos1=0.5):
+    ramp = nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].color = (*[float(c) for c in c0], 1.0)
+    ramp.color_ramp.elements[1].position = max(0.01, min(0.99, float(pos1)))
+    ramp.color_ramp.elements[1].color = (*[float(c) for c in c1], 1.0)
+    links.new(fac_out, ramp.inputs.get("Fac"))
+    return ramp
+
+
+def _bump(nodes, links, princ, height_out, strength=0.5, distance=0.2):
+    bump = nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = float(strength)
+    bump.inputs["Distance"].default_value = float(distance)
+    links.new(height_out, bump.inputs.get("Height"))
+    links.new(bump.outputs.get("Normal"), princ.inputs.get("Normal"))
+    return bump
+
+
+def _shade(base, f, toward):
+    """Lerp base toward a target color by f (0..1), clamped."""
+    return [max(0.0, min(1.0, b + (t - b) * f)) for b, t in zip(base, toward)]
+
+
+def _apply_procedural(mat, preset, base_color=(0.6, 0.6, 0.6), scale=3.0,
+                      blend=0.5, seed=0):
+    """Build a small EEVEE-safe node chain for a named preset. Warns on unknown."""
+    base = [float(c) for c in (base_color or (0.6, 0.6, 0.6))]
+    if preset == "wood_grain":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexWave", seed, scale)
+        tex.wave_type = "BANDS"
+        tex.bands_direction = "X"
+        try:
+            tex.inputs["Scale"].default_value = 1.0
+        except (KeyError, IndexError):
+            pass
+        ramp = _ramp(nodes, links, tex.outputs.get("Fac"),
+                     _shade(base, 0.35, (0.25, 0.15, 0.08)),
+                     _shade(base, -0.3, (0.2, 0.12, 0.06)), 0.5 + blend * 0.3)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        _bump(nodes, links, princ, tex.outputs.get("Fac"), 0.3, 0.1)
+    elif preset == "bark":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexVoronoi", seed, scale * 2)
+        try:
+            tex.feature = "F1"
+        except AttributeError:
+            pass
+        ramp = _ramp(nodes, links, tex.outputs.get("Distance"),
+                     _shade(base, 0.45, (0.12, 0.08, 0.05)), base, 0.35 + blend * 0.4)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        _bump(nodes, links, princ, tex.outputs.get("Distance"), 0.9, 0.4)
+    elif preset == "stone":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexVoronoi", seed, scale)
+        try:
+            tex.feature = "F1"
+        except AttributeError:
+            pass
+        ramp = _ramp(nodes, links, tex.outputs.get("Distance"),
+                     _shade(base, 0.3, (0.2, 0.2, 0.22)),
+                     _shade(base, -0.25, (0.75, 0.75, 0.78)), 0.45 + blend * 0.3)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        _bump(nodes, links, princ, tex.outputs.get("Distance"), 0.4, 0.15)
+    elif preset == "mossy":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexNoise", seed, scale * 0.7)
+        try:
+            tex.inputs["Roughness"].default_value = 0.7
+        except (KeyError, IndexError):
+            pass
+        ramp = _ramp(nodes, links, tex.outputs.get("Fac"),
+                     _shade(base, -0.4, (0.45, 0.45, 0.46)), base, 0.4 + blend * 0.35)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        _bump(nodes, links, princ, tex.outputs.get("Fac"), 0.6, 0.3)
+    elif preset == "grass_blend":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexNoise", seed, scale * 1.5)
+        ramp = _ramp(nodes, links, tex.outputs.get("Fac"),
+                     _shade(base, 0.3, (0.15, 0.3, 0.1)),
+                     _shade(base, -0.3, (0.45, 0.55, 0.25)), 0.5)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        _bump(nodes, links, princ, tex.outputs.get("Fac"), 0.15, 0.05)
+    elif preset == "worn_metal":
+        nodes, links, princ, tex = _tex_chain(mat, "ShaderNodeTexNoise", seed, scale * 2)
+        ramp = _ramp(nodes, links, tex.outputs.get("Fac"),
+                     base, _shade(base, 0.5, (0.3, 0.18, 0.1)), 0.55 + blend * 0.3)
+        links.new(ramp.outputs.get("Color"), princ.inputs.get("Base Color"))
+        try:
+            princ.inputs["Metallic"].default_value = 0.9
+        except KeyError:
+            pass
+        _bump(nodes, links, princ, tex.outputs.get("Fac"), 0.2, 0.05)
+    else:
+        import warnings
+        warnings.warn(f"unknown texture preset {preset!r}; using flat color")
+    return mat
 
 
 def _bevel_mod(ob, width, segments=2):
@@ -256,6 +392,12 @@ def _register_node(manifest, node, before, mat_spec):
             _ensure_material(ob, mat_spec["name"])
             _set_principled(ob.data.materials[0], mat_spec.get("color"), mat_spec.get("roughness"),
                             mat_spec.get("metallic"), mat_spec.get("emission"))
+            if mat_spec.get("texture"):
+                _apply_procedural(ob.data.materials[0], mat_spec["texture"],
+                                  mat_spec.get("color", (0.6, 0.6, 0.6)),
+                                  mat_spec.get("tex_scale", 3.0),
+                                  mat_spec.get("tex_blend", 0.5),
+                                  mat_spec.get("tex_seed", 0))
     return created
 
 
@@ -936,7 +1078,9 @@ def op_set_material(params):
     if not targets:
         raise ValueError("nothing to material")
     mat = _simple_mat(params["name"], params.get("color", (0.6, 0.6, 0.6)),
-                      params.get("roughness", 0.6), params.get("metallic", 0.0))
+                      params.get("roughness", 0.6), params.get("metallic", 0.0),
+                      params.get("texture"), params.get("tex_scale", 3.0),
+                      params.get("tex_blend", 0.5), params.get("tex_seed", 0))
     for ob in targets:
         ob.data.materials.clear()
         ob.data.materials.append(mat)
@@ -2055,6 +2199,15 @@ def _probe_sleep(params):
     return {"slept": True}
 
 
+def _probe_material_nodes(params):
+    """Node types in a material; test instrumentation for procedural presets."""
+    mat = bpy.data.materials.get(params.get("material", ""))
+    if mat is None or not mat.use_nodes:
+        return {"node_types": [], "node_count": 0}
+    kinds = sorted(n.bl_idname for n in mat.node_tree.nodes)
+    return {"node_types": kinds, "node_count": len(kinds)}
+
+
 def op_save_recipe(params):
     path = params.get("path")
     if not path:
@@ -2099,6 +2252,7 @@ OPS = {
     "_probe_scale": _probe_scale,
     "_probe_object_tris": _probe_object_tris,
     "_probe_sleep": _probe_sleep,
+    "probe_material_nodes": _probe_material_nodes,
     "save_recipe": op_save_recipe,
     "load_recipe": op_load_recipe,
 }

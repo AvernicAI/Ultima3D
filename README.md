@@ -44,7 +44,7 @@ All 15 are registered on the `ultima3d` MCP server.
 | `set_geometry(builder, node_name, params)` | Add one node to the current recipe and rebuild |
 | `inspect_asset()` | Machine facts: triangles, dimensions, materials, UVs, modifiers, recipe, blueprint |
 | `render_asset(views, resolution)` | `front, back, left, right, front_34, back_34, top, wire`, returned inline for vision evaluation |
-| `set_material(name, color, roughness, metallic, object)` | Apply a PBR material to the asset or a named object |
+| `set_material(name, color, roughness, metallic, object, texture, ...)` | Apply a PBR material, optionally a procedural texture preset (wood_grain, bark, stone, mossy, grass_blend, worn_metal) |
 | `validate_asset(triangle_budget)` | 7 machine checks (see below) |
 | `check_assertions(assertions, materials)` | Measure part count, ratios, symmetry, and color coverage over renders in bpy; unmeasurable checks return manual |
 | `finalize_asset(...)` | Clean → UV → decimate → bake → LODs → collision → GLB + `asset.json` |
@@ -94,6 +94,37 @@ create_3d(recipe={
   "sky":    {"builder": "skydome", "radius": 120},
 }, name="meadow_vista")
 ```
+
+## Procedural textures
+
+No downloads needed: a recipe material accepts an optional `texture` preset
+that builds a small deterministic EEVEE-safe shader-node chain (TexCoord →
+Mapping → Noise/Voronoi/Wave → ColorRamp → Principled + Bump) instead of a
+flat color. This is the realism path while the live addon's Poly Haven
+commands are unavailable — the overcast vista look needs no photo textures.
+
+| Preset | Built from | Good for |
+|---|---|---|
+| `wood_grain` | stretched Wave bands + Bump | beams, crates, handles, doors |
+| `bark` | Voronoi cells + strong Bump | tree trunks |
+| `stone` | Voronoi F1 + Bump | rocks, walls, arches, columns |
+| `mossy` | large-scale Noise blend + Bump | vista rocks, damp stone |
+| `grass_blend` | Noise blend + faint Bump | terrain |
+| `worn_metal` | Noise color/roughness + faint Bump | blades, latches, hoops |
+
+```python
+{"builder": "rock", "size": [0.5, 0.5, 0.4],
+ "material": {"name": "granite", "color": [0.5, 0.5, 0.52],
+               "roughness": 0.85, "texture": "stone",
+               "tex_scale": 3.0, "tex_blend": 0.5, "tex_seed": 4}}
+```
+
+`tex_scale` tiles the pattern, `tex_blend` shifts the color-ramp midpoint,
+`tex_seed` offsets the mapping for variation. Unknown names warn and fall
+back to flat color, never crashing the build. `set_material` accepts the same
+keys. Chains survive baking to the existing PNG channels. Verified by
+`tests/texture_test.py` (each preset builds, validates, renders; unknown
+name falls back; rebuild is deterministic).
 
 Every build maintains an in-memory **asset manifest**: each recipe node registers the
 objects it created, so all downstream operations (inspect, materials, validate, finalize,
@@ -314,6 +345,7 @@ python tests/smoke_test.py      # end-to-end: build → render → validate → 
 python tests/roundtrip_test.py  # build → rig (auto+fallback) → finalize → clear → re-import GLB → compare vs manifest
 python tests/builders_test.py   # sweep all 29 builders: each registers, inspects and validates
 python tests/vista_test.py      # composed vista: terrain + scatter + skydome, counts, ground snap, determinism
+python tests/texture_test.py    # procedural texture presets: build, validate, render, fallback, determinism
 python tests/params_test.py     # recipe/refine parameter reporting, over the MCP server itself
 python tests/blueprint_test.py  # blueprint compile + critic: counts, ratios, symmetry, color, occlusion, mirror depth
 python tests/timeout_test.py    # bounded worker calls: hung Blender is killed past the deadline
