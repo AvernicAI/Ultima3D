@@ -38,7 +38,7 @@ All 15 are registered on the `ultima3d` MCP server.
 
 | Tool | Purpose |
 |---|---|
-| `create_3d(recipe, name, blueprint)` | Build from a parametric recipe (26 builders) + optional design blueprint |
+| `create_3d(recipe, name, blueprint)` | Build from a parametric recipe (29 builders) + optional design blueprint |
 | `compile_blueprint(blueprint)` | Validate a v1 blueprint and compile it to recipe nodes + warnings |
 | `refine_asset(params)` | `{"changes": {"roof.height": 0.55}}` to patch params, or `{"recipe": {...}}` to replace wholesale |
 | `set_geometry(builder, node_name, params)` | Add one node to the current recipe and rebuild |
@@ -59,17 +59,41 @@ All 15 are registered on the `ultima3d` MCP server.
 
 ## Builders
 
-26 builders form the recipe vocabulary:
+29 builders form the recipe vocabulary:
 
 `box, rounded_box, cylinder, tapered_cylinder, sphere, torus, arch, panel, pipe, curve,
 extrusion, lathe, rock, beam, barrel, crate, roof, window, door, stairs, column, wall,
-fence, tree, weapon_blade, weapon_handle`
+fence, tree, weapon_blade, weapon_handle, terrain, scatter, skydome`
 
 Under them sit 17 deterministic low-level constructors, including `boolean_cut`, `array` and
 `radial_array` (the latter three take object references, so they are not recipe-addressable).
-Above them sit 12 `build_*` composites, such as `build_roof` (a solidified extrusion) and
-`build_barrel` (a lathe plus hoops). All 26 registered builders are verified to build on
+Above them sit 15 `build_*` composites, such as `build_roof` (a solidified extrusion) and
+`build_barrel` (a lathe plus hoops). All 29 registered builders are verified to build on
 Blender 5.2.2.
+
+## Vistas
+
+A vista is an ordinary recipe that composes an environment scene instead of a
+single asset: `terrain` meshes seeded value-noise ground (`size`, `segments`,
+`height`, `seed`), `scatter` stamps an earlier recipe node across it (`source`
++ `terrain` node names, `count`, `area`, `seed`, `scale_min/max`, `sink`), and
+`skydome` adds a gradient sky. Scatter reads the terrain node's spec, so
+placement and the mesh share one height function — instances sit on the
+ground by construction — and a seed makes the layout reproducible (rebuilding
+the same recipe yields the same triangles; verified by `tests/vista_test.py`).
+The dome is scene backdrop, not asset geometry: it renders but is excluded
+from inspect, validate, finalize and export. Vistas are big — budget tens of
+thousands of triangles, not the 8k single-asset default.
+
+```python
+create_3d(recipe={
+  "ground": {"builder": "terrain", "size": [24, 24], "segments": 32, "height": 1.6, "seed": 7,
+              "material": {"name": "grass", "color": [0.3, 0.45, 0.2], "roughness": 0.9}},
+  "oak":    {"builder": "tree", "height": 3.0},
+  "grove":  {"builder": "scatter", "source": "oak", "terrain": "ground", "count": 6, "seed": 3},
+  "sky":    {"builder": "skydome", "radius": 120},
+}, name="meadow_vista")
+```
 
 Every build maintains an in-memory **asset manifest**: each recipe node registers the
 objects it created, so all downstream operations (inspect, materials, validate, finalize,
@@ -288,7 +312,8 @@ The live tools were ported from
 pip install -e .
 python tests/smoke_test.py      # end-to-end: build → render → validate → finalize → rig → re-finalize
 python tests/roundtrip_test.py  # build → rig (auto+fallback) → finalize → clear → re-import GLB → compare vs manifest
-python tests/builders_test.py   # sweep all 26 builders: each registers, inspects and validates
+python tests/builders_test.py   # sweep all 29 builders: each registers, inspects and validates
+python tests/vista_test.py      # composed vista: terrain + scatter + skydome, counts, ground snap, determinism
 python tests/params_test.py     # recipe/refine parameter reporting, over the MCP server itself
 python tests/blueprint_test.py  # blueprint compile + critic: counts, ratios, symmetry, color, occlusion, mirror depth
 python tests/timeout_test.py    # bounded worker calls: hung Blender is killed past the deadline

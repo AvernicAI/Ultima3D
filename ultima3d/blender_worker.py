@@ -23,7 +23,7 @@ import traceback
 import bpy
 import bmesh
 import mathutils
-from mathutils import Vector, Euler
+from mathutils import Matrix, Vector, Euler
 
 # --------------------------------------------------------------------------
 # State
@@ -658,6 +658,173 @@ def build_weapon_handle(name, length=0.3, radius=0.03, **kw):
     return create_cylinder(name, radius, length, 12, kw.get("location", (0, 0, 0)))
 
 
+# --------------------------------------------------------------------------
+# Vista builders: composed environment scenes (terrain + scatter + sky).
+#
+# A vista is a recipe like any other asset, e.g. terrain + a tree node +
+# a scatter node that stamps the tree across the terrain. Placement and the
+# terrain mesh share one height function, so instances sit on the ground by
+# construction; a seed makes the layout reproducible.
+# --------------------------------------------------------------------------
+
+
+def _hash01(ix, iy, seed):
+    """Deterministic pseudo-random float in [0, 1) from integer lattice coords."""
+    h = (int(ix) * 374761393 + int(iy) * 668265263 + int(seed) * 2246822519) & 0xFFFFFFFFFFFFFFFF
+    h ^= h >> 13
+    h = (h * 1274126177) & 0xFFFFFFFFFFFFFFFF
+    h ^= h >> 16
+    return (h & 0xFFFFFFFF) / 2.0 ** 32
+
+
+def _value_noise(x, y, seed):
+    """Smooth value noise in [0, 1]: hashed lattice + smoothstep interpolation."""
+    ix, iy = math.floor(x), math.floor(y)
+    fx, fy = x - ix, y - iy
+    ux, uy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    a = _hash01(ix, iy, seed)
+    b = _hash01(ix + 1, iy, seed)
+    c = _hash01(ix, iy + 1, seed)
+    d = _hash01(ix + 1, iy + 1, seed)
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy
+
+
+def _terrain_height(x, y, size, height, seed):
+    """Terrain surface height at (x, y): 3-octave value noise in [-height/2, +height/2]."""
+    sx = max(float(size[0]), 1e-6)
+    total, amp, freq, norm = 0.0, 1.0, 3.0, 0.0
+    for octave in range(3):
+        total += amp * _value_noise(x / sx * freq + octave * 13.7, y / sx * freq - octave * 7.3, seed)
+        norm += amp
+        amp *= 0.5
+        freq *= 2.0
+    return (total / norm - 0.5) * 2.0 * float(height) * 0.5
+
+
+def build_terrain(name, size=(24, 24), segments=48, height=1.6, seed=0, **kw):
+    loc = kw.get("location", (0, 0, 0))
+    sx, sy = float(size[0]), float(size[1])
+    n = max(int(segments), 1)
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    grid = []
+    for j in range(n + 1):
+        row = []
+        for i in range(n + 1):
+            x = -sx / 2 + sx * i / n
+            y = -sy / 2 + sy * j / n
+            row.append(bm.verts.new((x, y, _terrain_height(x, y, (sx, sy), height, seed))))
+        grid.append(row)
+    for j in range(n):
+        for i in range(n):
+            bm.faces.new((grid[j][i], grid[j][i + 1], grid[j + 1][i + 1], grid[j + 1][i]))
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    ob = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(ob)
+    _shade_smooth_auto(ob)
+    return _place(ob, name, loc)
+
+
+def _vista_source_objects(node, manifest):
+    """Mesh objects a scatter node should stamp: an earlier node's outputs by name."""
+    names = (manifest.get("objects") or {}).get(node, [])
+    obs = [bpy.data.objects[n] for n in names if n in bpy.data.objects]
+    if not obs:
+        ob = bpy.data.objects.get(node)
+        obs = [ob] if ob is not None else []
+    return [o for o in obs if o.type == "MESH"]
+
+
+def build_scatter(name, source, terrain=None, count=25, area=None, seed=1,
+                  scale_min=0.8, scale_max=1.2, sink=0.05, **kw):
+    bpy.context.view_layer.update()
+    manifest = STATE.get("manifest") or {"objects": {}}
+    src = _vista_source_objects(source, manifest)
+    if not src:
+        raise ValueError(f"scatter {name!r}: unknown source node {source!r} -- build it earlier in the recipe")
+    tloc = (0, 0, 0)
+    tsize, theight, tseed = (10, 10), 0.0, 0
+    if terrain is not None:
+        spec = (STATE.get("recipe") or {}).get(terrain)
+        if not isinstance(spec, dict):
+            raise ValueError(f"scatter {name!r}: unknown terrain node {terrain!r}")
+        tsize = spec.get("size", tsize)
+        theight = spec.get("height", theight)
+        tseed = spec.get("seed", tseed)
+        tloc = spec.get("location", tloc)
+    ax, ay = (float(area[0]), float(area[1])) if area else (float(tsize[0]) * 0.8, float(tsize[1]) * 0.8)
+    lo = Vector((math.inf,) * 3)
+    hi = Vector((-math.inf,) * 3)
+    for o in src:
+        for c in o.bound_box:
+            w = o.matrix_world @ Vector(c)
+            lo = Vector(map(min, lo, w))
+            hi = Vector(map(max, hi, w))
+    anchor = Vector(((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, lo.z))
+    rng = random.Random(seed)
+    first = None
+    for i in range(int(count)):
+        x = rng.uniform(-ax / 2, ax / 2) + float(tloc[0])
+        y = rng.uniform(-ay / 2, ay / 2) + float(tloc[1])
+        ground = _terrain_height(x - float(tloc[0]), y - float(tloc[1]), tsize, theight, tseed) if terrain is not None else 0.0
+        target = Vector((x, y, float(tloc[2]) + ground - float(sink)))
+        s = rng.uniform(float(scale_min), float(scale_max))
+        yaw = rng.uniform(0, math.tau)
+        rot = Matrix.Rotation(yaw, 3, "Z")
+        for j, o in enumerate(src):
+            dup = o.copy()
+            dup.data = o.data.copy()
+            bpy.context.scene.collection.objects.link(dup)
+            # per-instance yaw + scale about the anchor keeps multi-object sources rigid;
+            # scale is baked into the mesh verts so object scale stays applied (validate)
+            rel = rot @ ((Vector(o.location) - anchor) * s)
+            dup.location = target + rel
+            e = dup.rotation_euler
+            dup.rotation_euler = Euler((e.x, e.y, e.z + yaw))
+            sv = Vector(o.scale) * s
+            for v in dup.data.vertices:
+                v.co = Vector((v.co.x * sv.x, v.co.y * sv.y, v.co.z * sv.z))
+            _place(dup, f"{name}_{i}_{j}", dup.location, dup.rotation_euler, dup.scale)
+            if first is None:
+                first = dup
+    return first
+
+
+def build_skydome(name, radius=120, segments=32,
+                  top_color=(0.25, 0.45, 0.8), horizon_color=(0.85, 0.87, 0.9), **kw):
+    loc = kw.get("location", (0, 0, 0))
+    ob = create_sphere(name, radius=float(radius), segments=max(int(segments), 8), location=loc)
+    mat = bpy.data.materials.new(name + "_sky")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    tex = nodes.new("ShaderNodeTexCoord")
+    sep = nodes.new("ShaderNodeSeparateXYZ")
+    ramp = nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.5
+    ramp.color_ramp.elements[0].color = (*[float(c) for c in horizon_color], 1.0)
+    ramp.color_ramp.elements[1].position = 1.0
+    ramp.color_ramp.elements[1].color = (*[float(c) for c in top_color], 1.0)
+    emit = nodes.new("ShaderNodeEmission")
+    emit.inputs["Strength"].default_value = 1.0
+    out = nodes.new("ShaderNodeOutputMaterial")
+    links.new(tex.outputs["Generated"], sep.inputs["Vector"])
+    links.new(sep.outputs["Z"], ramp.inputs["Fac"])
+    links.new(ramp.outputs["Color"], emit.inputs["Color"])
+    links.new(emit.outputs["Emission"], out.inputs["Surface"])
+    ob.data.materials.clear()
+    ob.data.materials.append(mat)
+    # Backdrop, not asset geometry: the dome stays in the scene for renders but
+    # out of the ASSET collection, so inspect/validate/finalize/export ignore it.
+    for uc in list(ob.users_collection):
+        uc.objects.unlink(ob)
+    bpy.context.scene.collection.objects.link(ob)
+    return ob
+
+
 # Registry used by the recipe compiler
 BUILDERS = {
     "box": create_box, "rounded_box": create_rounded_box, "cylinder": create_cylinder,
@@ -668,6 +835,7 @@ BUILDERS = {
     "door": build_door, "stairs": build_stairs, "column": build_column, "wall": build_wall,
     "fence": build_fence, "tree": build_tree, "weapon_blade": build_weapon_blade,
     "weapon_handle": build_weapon_handle,
+    "terrain": build_terrain, "scatter": build_scatter, "skydome": build_skydome,
 }
 
 
@@ -684,6 +852,10 @@ def op_build(params):
         _clear_scene()
     STATE["blueprint"] = blueprint
     manifest = {"objects": {}, "materials": [], "root_collection": ASSET_COLLECTION}
+    # Visible early so order-dependent builders (scatter reads the terrain node
+    # spec and earlier nodes' outputs) resolve against the recipe being built.
+    STATE["recipe"] = recipe
+    STATE["manifest"] = manifest
     node_tris = {}
     ignored_params = {}
     for node_name, spec in recipe.items():

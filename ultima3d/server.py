@@ -169,7 +169,9 @@ def create_3d(
 
     Available builders: box, rounded_box, cylinder, tapered_cylinder, sphere, torus, arch,
     panel, pipe, curve, extrusion, lathe, rock, beam, barrel, crate, roof, window, door,
-    stairs, column, wall, fence, tree, weapon_blade, weapon_handle.
+    stairs, column, wall, fence, tree, weapon_blade, weapon_handle,
+    terrain, scatter, skydome (vistas: scatter stamps an earlier node across a
+    terrain node by name; skydome is render-only backdrop, excluded from validate/export).
 
     Blueprint follows the asset_blueprint v1 contract in README (kept with the asset for its lifecycle).
     Returns created nodes + triangle count. Afterwards use render_asset to inspect visually.

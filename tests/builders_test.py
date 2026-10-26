@@ -22,7 +22,8 @@ WORKER = os.path.join(os.path.dirname(__file__), "..", "ultima3d", "blender_work
 BUILDERS = ["box", "rounded_box", "cylinder", "tapered_cylinder", "sphere", "torus",
             "arch", "panel", "pipe", "curve", "extrusion", "lathe", "rock", "beam",
             "barrel", "crate", "roof", "window", "door", "stairs", "column", "wall",
-            "fence", "tree", "weapon_blade", "weapon_handle"]
+            "fence", "tree", "weapon_blade", "weapon_handle",
+            "terrain", "scatter", "skydome"]
 
 # Builders whose geometry arguments have no usable default.
 REQUIRED_ARGS = {
@@ -34,6 +35,18 @@ REQUIRED_ARGS = {
 }
 
 MATERIAL = {"name": "steel", "color": [0.5, 0.5, 0.55], "roughness": 0.4, "metallic": 0.8}
+
+# Builders that cannot stand alone: scatter needs a source + terrain node built
+# earlier in the same recipe; skydome is scene backdrop and registers no asset
+# objects by design. Each maps to (recipe, expected "node" object count).
+COMPOUND = {
+    "scatter": ({"src": {"builder": "box", "size": [1, 1, 1]},
+                 "ground": {"builder": "terrain", "size": [12, 12], "segments": 16},
+                 "node": {"builder": "scatter", "source": "src", "terrain": "ground",
+                           "count": 4, "seed": 2, "material": MATERIAL}}, 4),
+    "skydome": ({"src": {"builder": "box", "size": [1, 1, 1], "material": MATERIAL},
+                 "node": {"builder": "skydome", "radius": 60}}, 0),
+}
 
 proc = subprocess.Popen(
     [BLENDER, "--background", "--factory-startup", "--python", WORKER],
@@ -70,12 +83,21 @@ print("ping:", call("ping")["blender"])
 failures = []
 for builder in BUILDERS:
     spec = {"builder": builder, "material": MATERIAL, **REQUIRED_ARGS.get(builder, {})}
-    built = call("build", {"recipe": {"node": spec}, "name": builder, "join": True})
+    expected = None
+    if builder in COMPOUND:
+        recipe, expected = COMPOUND[builder]
+    else:
+        recipe = {"node": spec}
+    built = call("build", {"recipe": recipe, "name": builder, "join": True})
     if "error" in built:
         failures.append((builder, f"build: {built['error']}"))
         continue
     registered = built["manifest"]["objects"]["node"]
-    if not registered:
+    if expected is not None:
+        if len(registered) != expected:
+            failures.append((builder, f"expected {expected} node objects, got {len(registered)}"))
+            continue
+    elif not registered:
         failures.append((builder, "registered no objects in the manifest"))
         continue
     # The bug this guards: the node built, but the mesh-only manifest diff missed it,

@@ -14,7 +14,7 @@ from pathlib import Path
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-SERVER = os.path.join(os.path.dirname(__file__), "..", "ultima3d", "server.py")
+ROOT = Path(os.path.dirname(__file__), "..").resolve()
 BLENDER = os.environ.get("ULTIMA3D_BLENDER")
 if not BLENDER:
     print("set ULTIMA3D_BLENDER to a Blender executable")
@@ -32,7 +32,10 @@ def check(label, passed, detail=""):
 async def main():
     env = dict(os.environ)
     env["ULTIMA3D_OUT"] = str(Path(os.path.dirname(__file__), "..", "output", "params").resolve())
-    params = StdioServerParameters(command=sys.executable, args=[SERVER], env=env)
+    # Launched as a module: ultima3d/server.py uses package-relative imports
+    # (from .registry import mcp) and cannot run as a bare file path.
+    params = StdioServerParameters(command=sys.executable, args=["-m", "ultima3d.server"],
+                                   env=env, cwd=str(ROOT))
 
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as s:
