@@ -31,6 +31,17 @@ from pathlib import Path
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.utilities.types import Image
 
+if __package__ in (None, ""):
+    # Launched as a bare file path (python .../ultima3d/server.py), e.g. by an
+    # MCP client config: anchor the project root on sys.path, then re-enter as
+    # the ultima3d.server module so the package-relative imports below resolve.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    import runpy as _runpy
+    _runpy.run_module("ultima3d.server", run_name="__main__")
+    raise SystemExit
+
 from .registry import mcp
 
 # Side-effect imports: register live-Blender + Godot tools on the same server.
