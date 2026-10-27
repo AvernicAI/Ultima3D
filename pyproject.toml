@@ -1,6 +1,6 @@
 [project]
 name = "ultima3d"
-version = "0.4.0"
+version = "0.5.0"
 description = "Ultima3D: unified agentic 3D MCP server — procedural asset compiler, live Blender GUI tools, Godot editor bridge."
 license = { text = "MIT" }
 requires-python = ">=3.10"
