@@ -32,6 +32,17 @@ game-ready GLB (+ LODs, collision hull, baked PBR, asset.json)
 The loop is: **build → look → judge → refine → validate → ship**. Refinement is parametric,
 so revisions rebuild deterministically from the saved recipe and stay reproducible.
 
+## Tray controller
+
+`python -m ultima3d.tray` (Windows) puts a tray icon in charge of the MCP
+server: Start / Stop / Restart / Open output folder / Quit. The icon shows
+state at a glance — gray stopped, green online, amber busy (the Blender
+worker is burning CPU on a job), blue idle — and a two-tone chime sounds
+once when a busy server goes quiet for 2 minutes, i.e. your job just
+finished. Single-instance guarded; exiting the tray stops the server.
+Zero new dependencies (stdlib + pywin32); verified by `tests/tray_test.py`.
+Double-click toggles start/stop.
+
 ## Tools
 
 All 15 are registered on the `ultima3d` MCP server.
