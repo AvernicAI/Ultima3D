@@ -1,8 +1,9 @@
 """Ultima3D — unified agentic 3D MCP server.
 
-One server, three backends: procedural asset compiler (background Blender
-worker), live Blender GUI tools (vendored under ultima3d.live), and Godot
-editor tools (ultima3d.godot). Backends degrade gracefully offline.
+One server, four backends: procedural asset compiler (background Blender
+worker), live Blender GUI tools (vendored under ultima3d.live), Godot
+editor tools (ultima3d.godot), and Photoshop CS3 tools (ultima3d.photoshop).
+Backends degrade gracefully offline.
 
 Config via env:
     ULTIMA3D_BLENDER   path to blender executable
@@ -44,9 +45,10 @@ if __package__ in (None, ""):
 
 from .registry import mcp
 
-# Side-effect imports: register live-Blender + Godot tools on the same server.
+# Side-effect imports: register live-Blender + Godot + Photoshop tools on the same server.
 from .live import server as _live_server  # noqa: F401
 from .godot import tools as _godot_tools  # noqa: F401
+from .photoshop import tools as _photoshop_tools  # noqa: F401
 
 _HERE = Path(__file__).resolve().parent
 WORKER = _HERE / "blender_worker.py"

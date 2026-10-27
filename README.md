@@ -126,6 +126,27 @@ keys. Chains survive baking to the existing PNG channels. Verified by
 `tests/texture_test.py` (each preset builds, validates, renders; unknown
 name falls back; rebuild is deterministic).
 
+## Photoshop CS3
+
+The `ultima3d.photoshop` backend pairs your portable CS3 install with a
+headless texture synthesizer, so realism work never waits on the GUI app:
+
+- `photoshop_make_texture(preset, size, seed)` — stdlib-only seamless
+  albedo/rough/normal PNG trios under `output/textures/` (Photoshop never
+  opens). Presets: `stone`, `wood_grain`, `noise`. Same seed rebuilds
+  identical bytes; verified by `tests/photoshop_test.py`.
+- `photoshop_status()` — reports the portable exe presence, COM
+  reachability (portables normally unregistered — that is state, not error),
+  and available JSX presets. Never hangs: the COM probe runs bounded.
+- `photoshop_run_script(script)` — fire-and-forget a bundled JSX preset
+  (`prep_texture`: flatten + RGB 8-bit; `export_png`: PNG copy beside the
+  PSD) or inline ExtendScript through `Photoshop.exe`. Refuses code that
+  never touches the app instead of launching blind.
+
+Set `ULTIMA3D_PHOTOSHOP` to override the exe path (default: the
+`Adobe Photoshop CS3 Portable` install). All calls degrade gracefully when
+CS3 is closed or absent.
+
 Every build maintains an in-memory **asset manifest**: each recipe node registers the
 objects it created, so all downstream operations (inspect, materials, validate, finalize,
 collision, export) act on the whole asset — there is no "primary object" concept.
