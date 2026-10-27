@@ -138,10 +138,23 @@ headless texture synthesizer, so realism work never waits on the GUI app:
 - `photoshop_status()` — reports the portable exe presence, COM
   reachability (portables normally unregistered — that is state, not error),
   and available JSX presets. Never hangs: the COM probe runs bounded.
+- `photoshop_exec(code)` — **live control**: runs ExtendScript in the open
+  Photoshop and returns its result (needs the bridge below). Create, modify,
+  query — e.g. `code='app.documents.length'` reports open docs. Send
+  `__quit__` to stop the bridge and hand Photoshop back.
+- `photoshop_create_image(width, height, background, name)` — live File > New
+  (`white`/`transparent`/`background`); returns Photoshop's confirmation.
 - `photoshop_run_script(script)` — fire-and-forget a bundled JSX preset
   (`prep_texture`: flatten + RGB 8-bit; `export_png`: PNG copy beside the
   PSD) or inline ExtendScript through `Photoshop.exe`. Refuses code that
   never touches the app instead of launching blind.
+
+Live control needs one manual step per Photoshop session (COM is unregistered
+in portable builds, so this socket bridge replaces it): in the open Photoshop,
+File > Scripts > Browse > `ultima3d/photoshop/daemon/ultima3d_bridge.jsx`
+(the exact path is in `photoshop_status` as `bridge_script`). While it runs,
+Photoshop is in agent mode; `live:true` in `photoshop_status` confirms the
+connection. `ULTIMA3D_PHOTOSHOP_PORT` overrides the 8767 default.
 
 Set `ULTIMA3D_PHOTOSHOP` to override the exe path (default: the
 `Adobe Photoshop CS3 Portable` install). All calls degrade gracefully when
