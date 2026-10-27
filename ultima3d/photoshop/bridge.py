@@ -105,10 +105,15 @@ def call(code: str | None = None, op: str = "exec", timeout: float = 60.0) -> di
             if not chunk:
                 break
             buf += chunk
+    raw = bytes(buf).decode("utf-8", "replace")
+    if not raw.strip():
+        raise RuntimeError(
+            "empty reply from the Photoshop bridge — reload the current daemon: "
+            f"quit the old bridge, then File > Scripts > Browse > {DAEMON_SCRIPT}") from None
     try:
-        resp = json.loads(bytes(buf).decode("utf-8", "replace"))
+        resp = json.loads(raw)
     except ValueError:
-        raise RuntimeError("unreadable reply from the Photoshop bridge") from None
+        raise RuntimeError(f"unreadable reply from the Photoshop bridge: {raw[:120]!r}") from None
     if not resp.get("ok"):
         raise RuntimeError(f"ExtendScript error: {resp.get('error')}")
     return resp

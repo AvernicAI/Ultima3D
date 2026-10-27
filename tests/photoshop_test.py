@@ -69,7 +69,7 @@ try:
     daemon = Path("ultima3d/photoshop/daemon/ultima3d_bridge.jsx")
     src = daemon.read_text(encoding="utf-8")
     assert daemon.is_file()
-    for token in ("listen", '"exec"', '"ping"', '"quit"', "conn.write"):
+    for token in ("listen", '"exec"', '"ping"', '"quit"', "conn.write", "$.sleep"):
         assert token in src, f"daemon missing {token}"
     print("  [ok] bridge daemon present with exec/ping/quit protocol")
 except Exception as e:

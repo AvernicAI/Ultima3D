@@ -20,6 +20,8 @@ function esc(s) {
 function sendReply(conn, id, ok, payload) {
     conn.write('{"id":' + id + ',"ok":' + (ok ? "true" : "false") +
         ',' + (ok ? '"result":' : '"error":') + esc(payload) + '}');
+    // CS3 drops unread-on-close send buffers: let the bytes leave first.
+    $.sleep(500);
     conn.close();
 }
 
