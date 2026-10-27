@@ -1,6 +1,5 @@
-//! Godot editor bridge client. Mirrors ultima3d/godot/bridge.py:
-//! one JSON POST per tool; screenshot payloads are validated (capture dir
-//! + .png + 20 MiB cap) and inlined as base64.
+//! Godot editor bridge client: one JSON POST per tool; screenshot payloads
+//! are validated (capture dir + .png + 20 MiB cap) and inlined as base64.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,14 +13,20 @@ pub fn bridge_url() -> String {
     std::env::var("GODOT_MCP_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/mcp".to_string())
 }
 
-/// Absolute capture dir ({cwd}/ultima3d/godot/captures), created on demand.
+/// Absolute capture dir ({ULTIMA3D_OUT}/godot_captures), created on demand.
 pub fn capture_dir() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or(PathBuf::from("."));
-    cwd.join("ultima3d").join("godot").join("captures")
+    let base = std::env::var("ULTIMA3D_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or(PathBuf::from("."))
+                .join("output")
+        });
+    base.join("godot_captures")
 }
 
 /// Lexically normalize an absolute path (resolves `.`/`..`, no I/O).
-fn normalize(mut p: PathBuf) -> PathBuf {
+fn normalize(p: PathBuf) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         use std::path::Component::*;
@@ -78,10 +83,7 @@ pub async fn call(tool: &str) -> Result<Value> {
         if raw.len() as u64 > SCREENSHOT_MAX_BYTES {
             anyhow::bail!("Screenshot exceeds the 20 MiB limit");
         }
-        let b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &raw,
-        );
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw);
         if let Some(obj) = data.as_object_mut() {
             obj.insert("_image_b64".to_string(), Value::String(b64));
             obj.insert(

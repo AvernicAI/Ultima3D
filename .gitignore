@@ -1,8 +1,5 @@
 /output
-__pycache__/
-*.py[oc]
-godot_mcp/captures/
 .freebuff/
 Our Build Plan.md
-.venv/
 /rust/target
+*.log

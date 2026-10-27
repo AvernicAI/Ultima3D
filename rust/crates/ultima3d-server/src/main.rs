@@ -1,13 +1,15 @@
-//! Ultima3D MCP server (Rust host). Mirrors ultima3d/server.py:
-//! one server, four backends — procedural worker, live Blender GUI,
-//! Godot editor bridge, Photoshop CS3 tools.
+//! Ultima3D MCP server (Rust host): one server, four backends — procedural
+//! worker, live Blender GUI, Godot editor bridge, Photoshop CS3 tools.
 //!
 //! The Blender geometry worker itself stays Python: it runs inside
-//! Blender's embedded interpreter, which exposes no Rust API.
+//! Blender's embedded interpreter (blender/worker.py), which exposes no
+//! Rust API. Everything else is Rust.
 
 mod agentic;
 mod godot;
+mod live;
 mod photoshop;
+mod safe_mode;
 mod textures;
 mod worker;
 
@@ -15,9 +17,13 @@ use std::env;
 use std::path::PathBuf;
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock},
-    tool, tool_handler, tool_router,
+    handler::server::{
+        router::{prompt::PromptRouter, tool::ToolRouter},
+        wrapper::Parameters,
+    },
+    model::{        CallToolResult, ContentBlock, PromptMessage, ProtocolVersion, Role, ServerConfig,
+    },
+    prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
@@ -252,10 +258,281 @@ struct ReviewArgs {
     materials: Option<Map<String, Value>>,
 }
 
+// -- live-Blender tool args (user_prompt kept for schema parity; the Rust
+// host does not ship telemetry credentials, so it is accepted and ignored)
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UserPromptArgs {
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ObjectInfoArgs {
+    object_name: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScreenshotArgs {
+    #[serde(default = "default_screenshot_size")]
+    max_size: i64,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+fn default_screenshot_size() -> i64 {
+    1000
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExecCodeArgs {
+    code: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DescribeNodeArgs {
+    bl_idname: String,
+    #[serde(default)]
+    property_overrides: Option<Map<String, Value>>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LookupArgs {
+    query: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PolyhavenCatsArgs {
+    #[serde(default = "default_hdris")]
+    asset_type: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+fn default_hdris() -> String {
+    "hdris".to_string()
+}
+
+fn default_asset_type_all() -> String {
+    "all".to_string()
+}
+
+fn default_search_limit() -> i64 {
+    20
+}
+
+fn default_resolution_1k() -> String {
+    "1k".to_string()
+}
+
+fn default_glb() -> String {
+    "glb".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchPolyhavenArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default = "default_asset_type_all")]
+    asset_type: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    attributes: Option<Value>,
+    #[serde(default)]
+    min_size_m: Option<f64>,
+    #[serde(default = "default_search_limit")]
+    limit: i64,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AssetPreviewArgs {
+    asset_id: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DownloadPolyhavenArgs {
+    asset_id: String,
+    asset_type: String,
+    #[serde(default = "default_resolution_1k")]
+    resolution: String,
+    #[serde(default)]
+    file_format: Option<String>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SetTextureArgs {
+    object_name: String,
+    texture_id: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchSketchfabArgs {
+    query: String,
+    #[serde(default)]
+    categories: Option<String>,
+    #[serde(default = "default_search_limit")]
+    count: i64,
+    #[serde(default = "default_true")]
+    downloadable: bool,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SketchfabPreviewArgs {
+    uid: String,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DownloadSketchfabArgs {
+    uid: String,
+    target_size: f64,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchPolypizzaArgs {
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    category: Option<Value>,
+    #[serde(default)]
+    licence: Option<Value>,
+    #[serde(default)]
+    animated: bool,
+    #[serde(default = "default_search_limit")]
+    limit: i64,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DownloadPolypizzaArgs {
+    model_id: String,
+    #[serde(default)]
+    normalize_size: bool,
+    #[serde(default = "default_target_size")]
+    target_size: f64,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+fn default_target_size() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RodinTextArgs {
+    text_prompt: String,
+    #[serde(default)]
+    bbox_condition: Option<Value>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RodinImagesArgs {
+    #[serde(default)]
+    input_image_paths: Option<Vec<String>>,
+    #[serde(default)]
+    input_image_urls: Option<Vec<String>>,
+    #[serde(default)]
+    bbox_condition: Option<Value>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PollRodinArgs {
+    #[serde(default)]
+    subscription_key: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportGeneratedArgs {
+    name: String,
+    #[serde(default)]
+    task_uuid: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HunyuanGenArgs {
+    #[serde(default)]
+    text_prompt: Option<String>,
+    #[serde(default)]
+    input_image_url: Option<String>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PollHunyuanArgs {
+    #[serde(default)]
+    job_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportHunyuanArgs {
+    name: String,
+    #[serde(default)]
+    zip_file_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExportSceneArgs {
+    filepath: String,
+    #[serde(default = "default_glb")]
+    format: String,
+    #[serde(default)]
+    object_names: Option<Vec<String>>,
+    #[serde(default)]
+    selection_only: bool,
+    #[serde(default = "default_true")]
+    apply_modifiers: bool,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FeedbackArgs {
+    feedback: String,
+    #[serde(default)]
+    correction_text: Option<String>,
+    #[serde(default)]
+    step_index: Option<i64>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+}
+
 #[derive(Clone)]
 struct Ultima3d {
     tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
     worker: Worker,
+    live: live::LiveConn,
 }
 
 #[tool_router]
@@ -268,25 +545,39 @@ impl Ultima3d {
         );
         let worker_py = env::var("ULTIMA3D_WORKER")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| cwd.join("ultima3d").join("blender_worker.py"));
+            .unwrap_or_else(|_| cwd.join("blender").join("worker.py"));
         let timeout: u64 = env::var("ULTIMA3D_CALL_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(600);
         let worker = Worker::new(blender, worker_py, timeout);
-        Self { tool_router: Self::tool_router(), worker }
+        Self {
+            tool_router: Self::tool_router(),
+            prompt_router: Self::prompt_router(),
+            worker,
+            live: live::LiveConn::new(),
+        }
+    }
+
+    fn prompt_router() -> PromptRouter<Self> {
+        Self::prompt_router_gen()
     }
 
     fn err_text(e: anyhow::Error) -> Result<CallToolResult, McpError> {
         // Tool ran and failed: tool-level error content, not a protocol error,
         // so the model receives the message (mirrors ToolError in server.py).
-        Ok(CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-            e.to_string(),
-        )]))
+        Ok(CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text(e.to_string()),
+        ]))
     }
 
-    #[tool(description = "Build a 3D asset in Blender from a parametric recipe and (optionally) a design blueprint.")]
-    async fn create_3d(&self, Parameters(args): Parameters<Create3dArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Build a 3D asset in Blender from a parametric recipe and (optionally) a design blueprint."
+    )]
+    async fn create_3d(
+        &self,
+        Parameters(args): Parameters<Create3dArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let params = serde_json::json!({
             "recipe": args.recipe,
             "blueprint": args.blueprint,
@@ -294,41 +585,54 @@ impl Ultima3d {
             "join": args.join,
         });
         match self.worker.call("build", params).await {
-            Ok(r) => Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                r.to_string(),
-            )])),
+            Ok(r) => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(r.to_string()),
+            ])),
             Err(e) => Self::err_text(e),
         }
     }
 
-    #[tool(description = "Return machine-readable facts about the current asset: triangles, dimensions, materials, UVs, recipe.")]
+    #[tool(
+        description = "Return machine-readable facts about the current asset: triangles, dimensions, materials, UVs, recipe."
+    )]
     async fn inspect_asset(&self) -> Result<CallToolResult, McpError> {
-        match self.worker.call("inspect", Value::Object(Default::default())).await {
-            Ok(r) => Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                r.to_string(),
-            )])),
+        match self
+            .worker
+            .call("inspect", Value::Object(Default::default()))
+            .await
+        {
+            Ok(r) => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(r.to_string()),
+            ])),
             Err(e) => Self::err_text(e),
         }
     }
 
     #[tool(description = "Check the Blender worker: version, liveness, current scene state.")]
     async fn ultima3d_status(&self) -> Result<CallToolResult, McpError> {
-        match self.worker.call("ping", Value::Object(Default::default())).await {
+        match self
+            .worker
+            .call("ping", Value::Object(Default::default()))
+            .await
+        {
             Ok(ping) => {
                 let body = serde_json::json!({"ok": true, "blender": ping.get("blender"), "worker": "running"});
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                    body.to_string(),
-                )]))
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(body.to_string()),
+                ]))
             }
-            Err(e) => Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
-            )])),
+            Err(e) => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(
+                    serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+                ),
+            ])),
         }
     }
 
     #[tool(description = "Clear the Blender scene and forget the current recipe/blueprint.")]
     async fn reset_scene(&self) -> Result<CallToolResult, McpError> {
-        self.worker_text("clear", Value::Object(Default::default())).await
+        self.worker_text("clear", Value::Object(Default::default()))
+            .await
     }
 
     async fn worker_text(&self, op: &str, params: Value) -> Result<CallToolResult, McpError> {
@@ -345,7 +649,9 @@ impl Ultima3d {
             .unwrap_or(Value::Null)
     }
 
-    #[tool(description = "Validate a v1 asset blueprint and compile it to recipe nodes plus warnings. Feed the recipe to create_3d.")]
+    #[tool(
+        description = "Validate a v1 asset blueprint and compile it to recipe nodes plus warnings. Feed the recipe to create_3d."
+    )]
     async fn compile_blueprint(
         &self,
         Parameters(args): Parameters<BlueprintArgs>,
@@ -357,7 +663,9 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Parametric refinement: pass {changes: {node.param: value}} using dotted node names, or {recipe: {...}} to replace the whole recipe.")]
+    #[tool(
+        description = "Parametric refinement: pass {changes: {node.param: value}} using dotted node names, or {recipe: {...}} to replace the whole recipe."
+    )]
     async fn refine_asset(
         &self,
         Parameters(args): Parameters<RefineAssetArgs>,
@@ -428,20 +736,28 @@ impl Ultima3d {
             let kept: Vec<&String> = applied.iter().filter(|d| !dropped.contains(d)).collect();
             obj.insert("applied".to_string(), serde_json::to_value(&kept).unwrap());
             ignored.extend(dropped);
-            obj.insert("ignored".to_string(), serde_json::to_value(&ignored).unwrap());
+            obj.insert(
+                "ignored".to_string(),
+                serde_json::to_value(&ignored).unwrap(),
+            );
         }
         ok_text(result.to_string())
     }
 
-    #[tool(description = "Render the asset from standard angles for visual evaluation. Returns the images inline.")]
+    #[tool(
+        description = "Render the asset from standard angles for visual evaluation. Returns the images inline."
+    )]
     async fn render_asset(
         &self,
         Parameters(args): Parameters<RenderAssetArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let fallback = ["front", "back", "left", "right", "front_34", "back_34", "top", "wire"];
-        let views: Vec<String> = args.views.clone().unwrap_or_else(|| {
-            fallback.iter().map(|s| s.to_string()).collect()
-        });
+        let fallback = [
+            "front", "back", "left", "right", "front_34", "back_34", "top", "wire",
+        ];
+        let views: Vec<String> = args
+            .views
+            .clone()
+            .unwrap_or_else(|| fallback.iter().map(|s| s.to_string()).collect());
         let dir = out_dir("renders");
         let r = match self
             .worker
@@ -476,7 +792,9 @@ impl Ultima3d {
         Ok(CallToolResult::success(blocks))
     }
 
-    #[tool(description = "Apply a PBR material to the asset (or a named object). color = [r,g,b] 0-1. texture names a procedural preset.")]
+    #[tool(
+        description = "Apply a PBR material to the asset (or a named object). color = [r,g,b] 0-1. texture names a procedural preset."
+    )]
     async fn set_material(
         &self,
         Parameters(args): Parameters<SetMaterialArgs>,
@@ -493,7 +811,9 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Add one node with a given builder to the current recipe and rebuild (additive edit).")]
+    #[tool(
+        description = "Add one node with a given builder to the current recipe and rebuild (additive edit)."
+    )]
     async fn set_geometry(
         &self,
         Parameters(args): Parameters<SetGeometryArgs>,
@@ -524,7 +844,9 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Machine-checked validation: duplicates, zero-area faces, budget, UVs, materials, scale, manifoldness.")]
+    #[tool(
+        description = "Machine-checked validation: duplicates, zero-area faces, budget, UVs, materials, scale, manifoldness."
+    )]
     async fn validate_asset(
         &self,
         Parameters(args): Parameters<BudgetArgs>,
@@ -536,7 +858,9 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Verify blueprint assertions against the live asset: part count, ratios, symmetry, color coverage. Unmeasurable checks return manual.")]
+    #[tool(
+        description = "Verify blueprint assertions against the live asset: part count, ratios, symmetry, color coverage. Unmeasurable checks return manual."
+    )]
     async fn check_assertions(
         &self,
         Parameters(args): Parameters<AssertionsArgs>,
@@ -548,13 +872,18 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Game-ready export: clean, UV, decimate to budget, bake textures, LODs, collision hull, GLB + asset.json.")]
+    #[tool(
+        description = "Game-ready export: clean, UV, decimate to budget, bake textures, LODs, collision hull, GLB + asset.json."
+    )]
     async fn finalize_asset(
         &self,
         Parameters(args): Parameters<FinalizeArgs>,
     ) -> Result<CallToolResult, McpError> {
         let channels = args.channels.unwrap_or_else(|| {
-            ["albedo", "normal", "roughness"].iter().map(|s| s.to_string()).collect()
+            ["albedo", "normal", "roughness"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         });
         self.worker_text(
             "finalize",
@@ -569,17 +898,26 @@ impl Ultima3d {
         .await
     }
 
-    #[tool(description = "Multi-bone auto-rig: mass-adaptive vertical bone chain with automatic vertex weights.")]
-    async fn rig_asset(&self, Parameters(args): Parameters<RigArgs>) -> Result<CallToolResult, McpError> {
-        self.worker_text("rig", serde_json::json!({"bones": args.bones})).await
+    #[tool(
+        description = "Multi-bone auto-rig: mass-adaptive vertical bone chain with automatic vertex weights."
+    )]
+    async fn rig_asset(
+        &self,
+        Parameters(args): Parameters<RigArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.worker_text("rig", serde_json::json!({"bones": args.bones}))
+            .await
     }
 
-    #[tool(description = "Save the current parametric recipe + blueprint as JSON for later editing/rebuilding.")]
+    #[tool(
+        description = "Save the current parametric recipe + blueprint as JSON for later editing/rebuilding."
+    )]
     async fn save_recipe(
         &self,
         Parameters(args): Parameters<PathArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.worker_text("save_recipe", serde_json::json!({"path": args.path})).await
+        self.worker_text("save_recipe", serde_json::json!({"path": args.path}))
+            .await
     }
 
     #[tool(description = "Load a saved recipe; optionally rebuild the asset from it immediately.")]
@@ -633,7 +971,10 @@ impl Ultima3d {
         &self,
         Parameters(args): Parameters<ExportGodotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let dest = args.dest_dir.map(PathBuf::from).unwrap_or_else(|| out_dir("godot_import"));
+        let dest = args
+            .dest_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| out_dir("godot_import"));
         if let Err(e) = std::fs::create_dir_all(&dest) {
             return Self::err_text(anyhow::anyhow!(e));
         }
@@ -672,7 +1013,10 @@ impl Ultima3d {
     ) -> Result<CallToolResult, McpError> {
         let validation = match self
             .worker
-            .call("validate", serde_json::json!({"triangle_budget": args.triangle_budget}))
+            .call(
+                "validate",
+                serde_json::json!({"triangle_budget": args.triangle_budget}),
+            )
             .await
         {
             Ok(v) => v,
@@ -692,7 +1036,452 @@ impl Ultima3d {
             },
             None => None,
         };
-        ok_text(agentic::review_gate(&validation.to_string(), assertions_json.as_deref()).to_string())
+        ok_text(
+            agentic::review_gate(&validation.to_string(), assertions_json.as_deref()).to_string(),
+        )
+    }
+
+    // -- combined status (worker + godot + live) --------------------------
+    #[tool(description = "One snapshot: worker, Godot bridge, live-Blender GUI.")]
+    async fn ultima3d_status_all(&self) -> Result<CallToolResult, McpError> {
+        let ultima = match self
+            .worker
+            .call("ping", Value::Object(Default::default()))
+            .await
+        {
+            Ok(ping) => {
+                serde_json::json!({"ok": true, "blender": ping.get("blender"), "worker": "running"})
+            }
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        let godot = match godot::call("status").await {
+            Ok(v) => v,
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        };
+        let live = live::connection_info();
+        ok_text(agentic::combine_status(ultima, godot, live).to_string())
+    }
+
+    // -- live Blender GUI (user's open Blender over :9876) -----------------
+    fn live_text(s: String) -> Result<CallToolResult, McpError> {
+        ok_text(s)
+    }
+
+    fn live_image_or_note(
+        bytes: Vec<u8>,
+        format: String,
+        note: String,
+    ) -> Result<CallToolResult, McpError> {
+        use base64::Engine as _;
+        if live::image_output_mode() == "inline" {
+            Ok(CallToolResult::success(vec![ContentBlock::image(
+                base64::engine::general_purpose::STANDARD.encode(&bytes),
+                live::mime_for(&format),
+            )]))
+        } else {
+            ok_text(note)
+        }
+    }
+
+    #[tool(
+        description = "Check whether the connected Blender addon matches this MCP server version."
+    )]
+    async fn get_addon_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_status_text())
+    }
+
+    #[tool(
+        description = "Turn OFF collection of prompts, code, screenshots and scene data. Takes effect immediately."
+    )]
+    async fn disable_telemetry(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::disable_telemetry_text())
+    }
+
+    #[tool(description = "Get detailed information about the current Blender scene.")]
+    async fn get_scene_info(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::scene_info_text())
+    }
+
+    #[tool(description = "Get detailed information about a specific object in the Blender scene.")]
+    async fn get_object_info(
+        &self,
+        Parameters(args): Parameters<ObjectInfoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::object_info_text(&args.object_name))
+    }
+
+    #[tool(
+        description = "Capture a screenshot of the current Blender 3D viewport. Returns a file path (or the image with BLENDER_MCP_IMAGE_OUTPUT=inline)."
+    )]
+    async fn get_viewport_screenshot(
+        &self,
+        Parameters(args): Parameters<ScreenshotArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match live::screenshot_bytes(args.max_size) {
+            Ok((bytes, format)) => {
+                if live::image_output_mode() == "inline" {
+                    Self::live_image_or_note(bytes, format, String::new())
+                } else {
+                    match live::screenshot_note(args.max_size) {
+                        Ok(note) => Self::live_text(note),
+                        Err(e) => Self::live_text(e),
+                    }
+                }
+            }
+            Err(e) => Self::live_text(e),
+        }
+    }
+
+    #[tool(description = "Execute arbitrary Python code in Blender. Break it into smaller chunks.")]
+    async fn execute_blender_code(
+        &self,
+        Parameters(args): Parameters<ExecCodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::execute_code_text(&args.code))
+    }
+
+    #[tool(
+        description = "Look up the property and socket schema of a Blender node type, without touching the scene."
+    )]
+    async fn describe_node_type(
+        &self,
+        Parameters(args): Parameters<DescribeNodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::describe_node_text(
+            &args.bl_idname,
+            args.property_overrides.as_ref(),
+        ))
+    }
+
+    #[tool(
+        description = "Structured Blender RNA/API reference lookup: types, properties, functions, operators."
+    )]
+    async fn bpy_api_lookup(
+        &self,
+        Parameters(args): Parameters<LookupArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::bpy_lookup_text(&args.query))
+    }
+
+    #[tool(description = "Get the categories and attributes you can filter Poly Haven assets by.")]
+    async fn get_polyhaven_categories(
+        &self,
+        Parameters(args): Parameters<PolyhavenCatsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::polyhaven_categories_text(&args.asset_type))
+    }
+
+    #[tool(description = "Search Poly Haven's library of free CC0 HDRIs, textures and models.")]
+    async fn search_polyhaven_assets(
+        &self,
+        Parameters(args): Parameters<SearchPolyhavenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::search_polyhaven_text(
+            args.query.as_deref(),
+            &args.asset_type,
+            args.category.as_deref(),
+            args.attributes.as_ref(),
+            args.min_size_m,
+            args.limit,
+        ))
+    }
+
+    #[tool(description = "Get a preview thumbnail of a Poly Haven asset by its ID.")]
+    async fn get_polyhaven_asset_preview(
+        &self,
+        Parameters(args): Parameters<AssetPreviewArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match live::polyhaven_preview(&args.asset_id) {
+            Ok((bytes, format, _name, _authors, _url)) => {
+                if live::image_output_mode() == "inline" {
+                    Self::live_image_or_note(bytes, format, String::new())
+                } else {
+                    match live::polyhaven_preview_note(&args.asset_id) {
+                        Ok(note) => Self::live_text(note),
+                        Err(e) => Self::live_text(e),
+                    }
+                }
+            }
+            Err(e) => Self::live_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Download and import a Polyhaven asset (hdris, textures, models) into Blender."
+    )]
+    async fn download_polyhaven_asset(
+        &self,
+        Parameters(args): Parameters<DownloadPolyhavenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::download_polyhaven_text(
+            &args.asset_id,
+            &args.asset_type,
+            &args.resolution,
+            args.file_format.as_deref(),
+        ))
+    }
+
+    #[tool(description = "Apply a previously downloaded Polyhaven texture to an object.")]
+    async fn set_texture(
+        &self,
+        Parameters(args): Parameters<SetTextureArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::set_texture_text(&args.object_name, &args.texture_id))
+    }
+
+    #[tool(description = "Check if PolyHaven integration is enabled in Blender.")]
+    async fn get_polyhaven_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_probe_text(
+            "get_polyhaven_status",
+            "PolyHaven is good at Textures, and has a wider variety of textures than Sketchfab.",
+            "PolyHaven",
+        ))
+    }
+
+    #[tool(description = "Check if Hyper3D Rodin integration is enabled in Blender.")]
+    async fn get_hyper3d_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_probe_text("get_hyper3d_status", "", "Hyper3D"))
+    }
+
+    #[tool(description = "Check if Sketchfab integration is enabled in Blender.")]
+    async fn get_sketchfab_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_probe_text(
+            "get_sketchfab_status",
+            "Sketchfab is good at Realistic models, and has a wider variety of models than PolyHaven.",
+            "Sketchfab",
+        ))
+    }
+
+    #[tool(description = "Search for models on Sketchfab with optional filtering.")]
+    async fn search_sketchfab_models(
+        &self,
+        Parameters(args): Parameters<SearchSketchfabArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::search_sketchfab_text(
+            &args.query,
+            args.categories.as_deref(),
+            args.count,
+            args.downloadable,
+        ))
+    }
+
+    #[tool(description = "Get a preview thumbnail of a Sketchfab model by its UID.")]
+    async fn get_sketchfab_model_preview(
+        &self,
+        Parameters(args): Parameters<SketchfabPreviewArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match live::sketchfab_preview(&args.uid) {
+            Ok((bytes, format, _name, _author)) => {
+                if live::image_output_mode() == "inline" {
+                    Self::live_image_or_note(bytes, format, String::new())
+                } else {
+                    match live::sketchfab_preview_note(&args.uid) {
+                        Ok(note) => Self::live_text(note),
+                        Err(e) => Self::live_text(e),
+                    }
+                }
+            }
+            Err(e) => Self::live_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Download and import a Sketchfab model by its UID (scaled to target_size metres)."
+    )]
+    async fn download_sketchfab_model(
+        &self,
+        Parameters(args): Parameters<DownloadSketchfabArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::download_sketchfab_text(&args.uid, args.target_size))
+    }
+
+    #[tool(description = "Check if Poly Pizza integration is enabled in Blender.")]
+    async fn get_polypizza_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_probe_text(
+            "get_polypizza_status",
+            " Poly Pizza is good at stylised, low-poly game assets. Everything is free under CC0 or CC-BY, and models are far lighter geometry than Sketchfab's.",
+            "Poly Pizza",
+        ))
+    }
+
+    #[tool(description = "Search for models on Poly Pizza with optional filtering.")]
+    async fn search_polypizza_models(
+        &self,
+        Parameters(args): Parameters<SearchPolypizzaArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::search_polypizza_text(
+            &args.query,
+            args.category.as_ref().unwrap_or(&Value::Null),
+            args.licence.as_ref().unwrap_or(&Value::Null),
+            args.animated,
+            args.limit,
+        ))
+    }
+
+    #[tool(description = "Download and import a Poly Pizza model by its ID.")]
+    async fn download_polypizza_model(
+        &self,
+        Parameters(args): Parameters<DownloadPolypizzaArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::download_polypizza_text(
+            &args.model_id,
+            args.normalize_size,
+            args.target_size,
+        ))
+    }
+
+    #[tool(
+        description = "Generate 3D asset using Hyper3D from a text description, and import it into Blender."
+    )]
+    async fn generate_hyper3d_model_via_text(
+        &self,
+        Parameters(args): Parameters<RodinTextArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::rodin_text_job(
+            &args.text_prompt,
+            args.bbox_condition.as_ref().unwrap_or(&Value::Null),
+        ))
+    }
+
+    #[tool(
+        description = "Generate 3D asset using Hyper3D from images, and import it into Blender."
+    )]
+    async fn generate_hyper3d_model_via_images(
+        &self,
+        Parameters(args): Parameters<RodinImagesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::rodin_images_job(
+            args.input_image_paths.as_deref(),
+            args.input_image_urls.as_deref(),
+            args.bbox_condition.as_ref().unwrap_or(&Value::Null),
+        ))
+    }
+
+    #[tool(description = "Check if a Hyper3D Rodin generation task is completed.")]
+    async fn poll_rodin_job_status(
+        &self,
+        Parameters(args): Parameters<PollRodinArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::poll_rodin_text(
+            args.subscription_key.as_deref(),
+            args.request_id.as_deref(),
+        ))
+    }
+
+    #[tool(description = "Import the asset generated by Hyper3D Rodin after the task completes.")]
+    async fn import_generated_asset(
+        &self,
+        Parameters(args): Parameters<ImportGeneratedArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::import_generated_text(
+            &args.name,
+            args.task_uuid.as_deref(),
+            args.request_id.as_deref(),
+        ))
+    }
+
+    #[tool(description = "Check if Hunyuan3D integration is enabled in Blender.")]
+    async fn get_hunyuan3d_status(
+        &self,
+        Parameters(args): Parameters<UserPromptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = args;
+        Self::live_text(live::addon_probe_text(
+            "get_hunyuan3d_status",
+            "",
+            "Hunyuan3D",
+        ))
+    }
+
+    #[tool(
+        description = "Generate 3D asset using Hunyuan3D from text and/or an image, and import it into Blender."
+    )]
+    async fn generate_hunyuan3d_model(
+        &self,
+        Parameters(args): Parameters<HunyuanGenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::generate_hunyuan_text(
+            args.text_prompt.as_deref(),
+            args.input_image_url.as_deref(),
+        ))
+    }
+
+    #[tool(description = "Check if a Hunyuan3D generation task is completed.")]
+    async fn poll_hunyuan_job_status(
+        &self,
+        Parameters(args): Parameters<PollHunyuanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::poll_hunyuan_text(args.job_id.as_deref()))
+    }
+
+    #[tool(description = "Import the asset generated by Hunyuan3D after the task completes.")]
+    async fn import_generated_asset_hunyuan(
+        &self,
+        Parameters(args): Parameters<ImportHunyuanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::import_hunyuan_text(
+            &args.name,
+            args.zip_file_url.as_deref(),
+        ))
+    }
+
+    #[tool(
+        description = "Export the whole scene, selection, or named objects to GLB/FBX for another application."
+    )]
+    async fn export_scene(
+        &self,
+        Parameters(args): Parameters<ExportSceneArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::export_scene_text(
+            &args.filepath,
+            &args.format,
+            args.object_names.as_deref(),
+            args.selection_only,
+            args.apply_modifiers,
+        ))
+    }
+
+    #[tool(
+        description = "Record evaluation feedback (accept | reject | undo | correction) for a captured trajectory step."
+    )]
+    async fn record_trajectory_feedback(
+        &self,
+        Parameters(args): Parameters<FeedbackArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Self::live_text(live::feedback_text(
+            &args.feedback,
+            args.correction_text.as_deref(),
+            args.step_index,
+            args.user_prompt.as_deref(),
+        ))
     }
 
     // -- Godot editor bridge --------------------------------------------
@@ -750,12 +1539,16 @@ impl Ultima3d {
     }
 
     // -- Photoshop CS3 ----------------------------------------------------
-    #[tool(description = "Check the Photoshop CS3 backend: exe presence, COM reachability, JSX presets.")]
+    #[tool(
+        description = "Check the Photoshop CS3 backend: exe presence, COM reachability, JSX presets."
+    )]
     async fn photoshop_status(&self) -> Result<CallToolResult, McpError> {
         ok_text(photoshop::status().to_string())
     }
 
-    #[tool(description = "Run ExtendScript in the OPEN Photoshop and return its result (live control). Send __quit__ to stop the bridge.")]
+    #[tool(
+        description = "Run ExtendScript in the OPEN Photoshop and return its result (live control). Send __quit__ to stop the bridge."
+    )]
     async fn photoshop_exec(
         &self,
         Parameters(args): Parameters<ExecArgs>,
@@ -772,22 +1565,31 @@ impl Ultima3d {
         }
     }
 
-    #[tool(description = "Create a new RGB image in the open Photoshop (white/transparent/background).")]
+    #[tool(
+        description = "Create a new RGB image in the open Photoshop (white/transparent/background)."
+    )]
     async fn photoshop_create_image(
         &self,
         Parameters(args): Parameters<CreateImageArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let code = match photoshop::build_create(args.width, args.height, &args.background, &args.name) {
-            Ok(c) => c,
-            Err(e) => return ok_text(serde_json::json!({"ok": false, "error": e.to_string()}).to_string()),
-        };
+        let code =
+            match photoshop::build_create(args.width, args.height, &args.background, &args.name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return ok_text(
+                        serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+                    )
+                }
+            };
         match photoshop::call(Some(&code), "exec", std::time::Duration::from_secs(60)) {
             Ok(v) => ok_text(v.to_string()),
             Err(e) => ok_text(serde_json::json!({"ok": false, "error": e.to_string()}).to_string()),
         }
     }
 
-    #[tool(description = "Run a JSX preset (prep_texture, export_png) or inline ExtendScript in CS3. Fire-and-forget.")]
+    #[tool(
+        description = "Run a JSX preset (prep_texture, export_png) or inline ExtendScript in CS3. Fire-and-forget."
+    )]
     async fn photoshop_run_script(
         &self,
         Parameters(args): Parameters<ScriptArgs>,
@@ -798,13 +1600,21 @@ impl Ultima3d {
         }
     }
 
-    #[tool(description = "Synthesize a tileable texture trio (albedo/rough/normal PNGs) headlessly. Presets: stone, wood_grain, noise.")]
+    #[tool(
+        description = "Synthesize a tileable texture trio (albedo/rough/normal PNGs) headlessly. Presets: stone, wood_grain, noise."
+    )]
     async fn photoshop_make_texture(
         &self,
         Parameters(args): Parameters<MakeTextureArgs>,
     ) -> Result<CallToolResult, McpError> {
         let dir = out_dir("textures");
-        match textures::make_texture(&args.preset, args.size.max(0) as usize, args.seed as u64, &dir, None) {
+        match textures::make_texture(
+            &args.preset,
+            args.size.max(0) as usize,
+            args.seed as u64,
+            &dir,
+            None,
+        ) {
             Ok(v) => ok_text(v.to_string()),
             Err(e) => ok_text(
                 serde_json::json!({"ok": false, "error": e.to_string(),
@@ -815,8 +1625,40 @@ impl Ultima3d {
     }
 }
 
+#[prompt_router(router = "prompt_router_gen")]
+impl Ultima3d {
+    #[prompt(
+        name = "asset_creation_strategy",
+        description = "Defines the preferred strategy for creating assets in Blender"
+    )]
+    async fn asset_creation_strategy(&self) -> Vec<PromptMessage> {
+        vec![PromptMessage::new_text(
+            Role::User,
+            live::ASSET_CREATION_STRATEGY,
+        )]
+    }
+}
+
 #[tool_handler]
-impl ServerHandler for Ultima3d {}
+#[prompt_handler]
+impl ServerHandler for Ultima3d {
+    fn get_info(&self) -> ServerConfig {
+        // ServerConfig is #[non_exhaustive]: start from Default and mutate.
+        let mut info = ServerConfig::default();
+        info.protocol_version = ProtocolVersion::LATEST;
+        info.capabilities.tools = Some(Default::default());
+        info.capabilities.prompts = Some(Default::default());
+        info.server_info.name = "ultima3d".to_string();
+        info.server_info.title = Some("Ultima3D".to_string());
+        info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
+        info.server_info.description = Some(
+            "Agentic 3D asset generator: procedural Blender worker, live Blender GUI, Godot editor and Photoshop CS3 backends."
+                .to_string(),
+        );
+        info.instructions = Some(live::server_instructions());
+        info
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

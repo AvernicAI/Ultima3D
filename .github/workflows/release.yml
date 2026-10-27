@@ -1,0 +1,26 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binaries
+        run: cargo build --release --workspace --manifest-path rust/Cargo.toml
+      - name: Attach binaries to the GitHub release
+        shell: bash
+        run: >
+          gh release create "${{ github.ref_name }}"
+          rust/target/release/ultima3d-server.exe
+          rust/target/release/ultima3d-tray.exe
+          --title "${{ github.ref_name }}"
+          --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

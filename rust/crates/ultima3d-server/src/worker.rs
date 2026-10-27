@@ -1,6 +1,6 @@
 //! Blender background-worker client: persistent `blender --background`,
 //! JSON-lines RPC where responses are `@JSON@`-prefixed. Mirrors
-//! ultima3d/server.py Worker: one in-flight call at a time, hung workers are
+//! Blender background-worker client: one in-flight call at a time, hung workers are
 //! killed past the deadline so the next call restarts fresh.
 //!
 //! Pipe I/O blocks, so every call runs on a blocking thread behind an
@@ -36,7 +36,12 @@ struct WorkerInner {
 impl Worker {
     pub fn new(blender: PathBuf, worker_py: PathBuf, timeout_secs: u64) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(WorkerInner { id: 0, child: None, stdin: None, stdout: None })),
+            inner: Arc::new(Mutex::new(WorkerInner {
+                id: 0,
+                child: None,
+                stdin: None,
+                stdout: None,
+            })),
             blender,
             worker_py,
             timeout: Duration::from_secs(timeout_secs),
@@ -79,16 +84,15 @@ impl Worker {
     }
 
     pub fn is_running(&self) -> bool {
-        self.inner
-            .lock()
-            .map(|mut g| g.alive())
-            .unwrap_or(false)
+        self.inner.lock().map(|mut g| g.alive()).unwrap_or(false)
     }
 }
 
 impl WorkerInner {
     fn alive(&mut self) -> bool {
-        self.child.as_mut().is_some_and(|c| c.try_wait().unwrap_or(None).is_none())
+        self.child
+            .as_mut()
+            .is_some_and(|c| c.try_wait().unwrap_or(None).is_none())
     }
 
     fn ensure(&mut self, blender: &std::path::Path, worker_py: &std::path::Path) -> Result<()> {
@@ -97,7 +101,10 @@ impl WorkerInner {
         }
         self.kill();
         if !blender.is_file() {
-            anyhow::bail!("blender not found at {}; set ULTIMA3D_BLENDER", blender.display());
+            anyhow::bail!(
+                "blender not found at {}; set ULTIMA3D_BLENDER",
+                blender.display()
+            );
         }
         let mut child = Command::new(blender)
             .args(["--background", "--factory-startup", "--python"])
@@ -108,7 +115,11 @@ impl WorkerInner {
             .spawn()
             .context("spawning blender worker")?;
         let stdin = child.stdin.take().context("worker stdin")?;
-        let stdout = child.stdout.take().map(BufReader::new).context("worker stdout")?;
+        let stdout = child
+            .stdout
+            .take()
+            .map(BufReader::new)
+            .context("worker stdout")?;
         self.child = Some(child);
         self.stdin = Some(stdin);
         self.stdout = Some(stdout);
@@ -155,7 +166,10 @@ impl WorkerInner {
                 continue; // stale response from a crashed previous call
             }
             if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-                let err = resp.get("error").and_then(Value::as_str).unwrap_or("unknown");
+                let err = resp
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 let trace = resp.get("trace").and_then(Value::as_str).unwrap_or("");
                 anyhow::bail!("{op} failed: {err}\n{trace}");
             }

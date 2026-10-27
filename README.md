@@ -2,8 +2,8 @@
 
 AI-directed procedural 3D synthesis: the LLM owns **intent and visual judgement**, the
 Blender worker owns **mechanics and verification**. One `ultima3d` MCP server exposes
-56 tools: 15 procedural asset tools, 32 live-Blender GUI tools, 6 Godot editor tools,
-and 3 pipeline tools — plus the `asset_creation_strategy` prompt.
+61 tools: 15 procedural asset tools, 32 live-Blender GUI tools, 6 Godot editor tools,
+5 Photoshop CS3 tools, and 3 pipeline tools — plus the `asset_creation_strategy` prompt.
 
 **Milestones.** v0.1 — deterministic procedural asset compiler proven.
 v0.2 — trustworthy game-asset compiler: measurements are asset-wide, budgets
@@ -11,15 +11,21 @@ are enforceable, materials are consistent, rigs are tested, and exported artifac
 round-trip verified.
 v0.3 — export-only finalize (decimation never touches the scene, reruns are
 idempotent) and bounded worker calls (a hung Blender is killed past a deadline).
-v0.4 (this tree) — blueprint compiler: v1 contract, `compile_blueprint` +
+v0.4 — blueprint compiler: v1 contract, `compile_blueprint` +
 `check_assertions` critic (counts, ratios, symmetry, color coverage, occlusion,
 mirrored depth).
+v0.5 — Rust MCP host: the 61-tool surface (worker-protocol, live-Blender,
+Godot, Photoshop) runs as a single `ultima3d-server` binary; only the code
+that executes *inside* Blender/Godot/Photoshop stays in its native language.
+v0.6 (this tree) — full Rust switch: host-side Python deleted, system tray
+ported to Rust (`ultima3d-tray`, whose icon mark is rendered by Ultima3D
+itself), GitHub CI (build + 61-tool parity test) and release workflows.
 
 ```text
 LLM (any MCP client)
  │  create_3d(recipe, blueprint)
  ▼
-ultima3d MCP server (Python, stdio, mcp 2.x)
+ultima3d-server (Rust, stdio MCP)
  │  JSON-lines RPC ("@JSON@"-prefixed responses)
  ▼
 blender --background --factory-startup
@@ -34,18 +40,23 @@ so revisions rebuild deterministically from the saved recipe and stay reproducib
 
 ## Tray controller
 
-`python -m ultima3d.tray` (Windows) puts a tray icon in charge of the MCP
-server: Start / Stop / Restart / Open output folder / Quit. The icon shows
-state at a glance — gray stopped, green online, amber busy (the Blender
-worker is burning CPU on a job), blue idle — and a two-tone chime sounds
-once when a busy server goes quiet for 2 minutes, i.e. your job just
+`ultima3d-tray` (Windows, `cargo run -p ultima3d-tray`) puts a tray icon in
+charge of the MCP server: Start / Stop / Restart / Open output folder / Quit.
+The icon shows state at a glance — gray stopped, green online, amber busy (the
+Blender worker is burning CPU on a job), blue idle — and a two-tone chime
+sounds once when a busy server goes quiet for 2 minutes, i.e. your job just
 finished. Single-instance guarded; exiting the tray stops the server.
-Zero new dependencies (stdlib + pywin32); verified by `tests/tray_test.py`.
-Double-click toggles start/stop.
+Left-click toggles start/stop. The icon mark itself is rendered by Ultima3D:
+`output/icon_work/render_icon.py` builds a beveled block in Blender and
+renders `rust/crates/ultima3d-tray/assets/mark.png`, which the tray
+composites over a per-status backdrop at runtime. Status logic, icons and the
+process manager are covered by the tray crate's unit tests.
 
 ## Tools
 
-All 15 are registered on the `ultima3d` MCP server.
+All 61 are registered on the `ultima3d` MCP server: the 15 procedural tools below,
+plus `ultima3d_status_all`, `export_asset_to_godot` and `review_asset_loop` (pipeline),
+6 `godot_*` tools, 5 `photoshop_*` tools, and 32 live-Blender GUI tools.
 
 | Tool | Purpose |
 |---|---|
@@ -162,7 +173,7 @@ headless texture synthesizer, so realism work never waits on the GUI app:
 
 Live control needs one manual step per Photoshop session (COM is unregistered
 in portable builds, so this socket bridge replaces it): in the open Photoshop,
-File > Scripts > Browse > `ultima3d/photoshop/daemon/ultima3d_bridge.jsx`
+File > Scripts > Browse > `photoshop/daemon/ultima3d_bridge.jsx`
 (the exact path is in `photoshop_status` as `bridge_script`). While it runs,
 Photoshop is in agent mode; `live:true` in `photoshop_status` confirms the
 connection. `ULTIMA3D_PHOTOSHOP_PORT` overrides the 8767 default.
@@ -364,89 +375,92 @@ finalize_asset(name="medieval_mailbox")
 ## Layout
 
 ```text
-ultima3d/
-  server.py        procedural asset tools (background Blender worker) + pipeline
-  registry.py      the single shared MCPServer("ultima3d")
-  blender_worker.py  geometry compiler run under blender --background
-  live/            live-Blender GUI tools (ported from mcp-for-blender to mcp 2.x)
-  live/bundled/    Blender addon installed into the user's Blender GUI
-  godot/           Godot bridge client + godot_* tools
-  godot/addon/     Godot editor plugin (install into your project)
-  godot/captures/  Godot viewport screenshots
-  agentic.py       pipeline helpers (status fan-out, export picker, review gate)
+rust/                    Rust workspace (the entire host: server + tray)
+  crates/ultima3d-server/  the `ultima3d` MCP server (61 tools + 1 prompt)
+  crates/ultima3d-tray/    the Windows system-tray controller
+  crates/ultima3d-tray/assets/mark.png  tray mark, rendered by Ultima3D itself
+blender/
+  worker.py      geometry compiler run under blender --background (stays
+                 Python: it executes inside Blender's embedded interpreter,
+                 which exposes no Rust API)
+  addon.py       live-Blender GUI addon (install into the user's Blender)
+photoshop/
+  daemon/        ExtendScript TCP bridge (File > Scripts > Browse in open CS3)
+  scripts/       bundled JSX presets (prep_texture, export_png)
+godot/addon/     Godot editor plugin (install into your project)
+output/icon_work/render_icon.py  renders the tray mark (Blender, headless)
 ```
 
-A plain `git clone` is all you need — no submodules.
+A plain `git clone` is all you need — no submodules. GitHub CI builds the
+workspace and runs `cargo test` (unit tests + a live 61-tool parity check
+against the built server, no Blender/Godot required); releases are cut from
+`v*` tags with both Windows binaries attached.
 
 The live tools were ported from
-[mcp-for-blender](https://github.com/ahujasid/mcp-for-blender) to `mcp>=2.0`
-(`FastMCP` → `MCPServer`); upstream merges are manual from here.
+[mcp-for-blender](https://github.com/ahujasid/mcp-for-blender); upstream
+merges are manual from here.
 
 ## Run
 
 ```bash
-pip install -e .
-python tests/smoke_test.py      # end-to-end: build → render → validate → finalize → rig → re-finalize
-python tests/roundtrip_test.py  # build → rig (auto+fallback) → finalize → clear → re-import GLB → compare vs manifest
-python tests/builders_test.py   # sweep all 29 builders: each registers, inspects and validates
-python tests/vista_test.py      # composed vista: terrain + scatter + skydome, counts, ground snap, determinism
-python tests/texture_test.py    # procedural texture presets: build, validate, render, fallback, determinism
-python tests/params_test.py     # recipe/refine parameter reporting, over the MCP server itself
-python tests/blueprint_test.py  # blueprint compile + critic: counts, ratios, symmetry, color, occlusion, mirror depth
-python tests/timeout_test.py    # bounded worker calls: hung Blender is killed past the deadline
+cd rust && cargo build --workspace     # ultima3d-server + ultima3d-tray
+cargo test --workspace                 # unit tests + 61-tool parity test
+cargo run -p ultima3d-tray             # tray icon owning the server
 ```
 
+See `rust/BUILD.md` for the Windows linker setup (llvm-mingw, no VS needed).
+
 Config (env): `ULTIMA3D_BLENDER` (Blender executable), `ULTIMA3D_OUT` (output dir),
+`ULTIMA3D_WORKER` (worker script, default `blender/worker.py`),
+`ULTIMA3D_SERVER` (server binary for the tray to own),
 `ULTIMA3D_CALL_TIMEOUT` (per-call worker deadline in seconds, default 600 — a hung
 worker is killed past it, losing its scene state).
 
-Requires **Blender 5.2 LTS**, **mcp >= 2.0**, and **httpx >= 0.27.0**
-(telemetry uploads). Godot bridge needs Godot 4.x with the bundled editor plugin enabled.
+Requires **Blender 5.2 LTS** and a Rust stable toolchain.
+Godot bridge needs Godot 4.x with the bundled editor plugin enabled.
 
 ## Backends
 
-One MCP server, three backends — all registered on the single `ultima3d` registry
-(`ultima3d/registry.py`), all degrading gracefully when their editor is offline:
+One MCP server, four backends — all degrading gracefully when their editor is offline:
 
 - **Procedural** (`create_3d`, `refine_asset`, `render_asset`, `validate_asset`,
   `finalize_asset`, …) — background Blender worker, deterministic + measurable.
 - **Live Blender** (`get_scene_info`, `execute_blender_code`,
   `get_viewport_screenshot`, asset libraries, …) — drives the user's open Blender
   GUI over `BLENDER_HOST:BLENDER_PORT` (default `localhost:9876`). Install the addon
-  from `ultima3d/live/bundled/addon.py`, then enable it in Blender preferences.
+  from `blender/addon.py`, then enable it in Blender preferences.
 - **Godot** (`godot_status`, `godot_scene_tree`, `godot_run_project`,
   `godot_stop_project`, `godot_debug_output`, `godot_screenshot`) — drives the
   running Godot editor over `GODOT_MCP_URL` (default `http://127.0.0.1:8765/mcp`).
-  Copy `ultima3d/godot/addon/` into your Godot project's `addons/` folder and enable
+  Copy `godot/addon/` into your Godot project's `addons/` folder and enable
   **Ultima3D Godot Bridge** under Project Settings → Plugins.
+- **Photoshop CS3** (`photoshop_status`, `photoshop_exec`, `photoshop_make_texture`, …)
+  — portable-CS3 live control over the ExtendScript bridge plus a headless
+  texture synthesizer (see the Photoshop CS3 section).
 - **Pipeline** (`ultima3d_status_all`, `export_asset_to_godot`, `review_asset_loop`)
   — status fan-out, GLB handoff to a Godot project, validate+critic review gate.
 
-Test: `python tests/unified_test.py` (needs `mcp>=2.0` + `httpx` installed;
-no Blender/Godot required).
-
 ## Freebuff / MCP client wiring
 
-`~/.agents/mcp.json`:
+`~/.agents/mcp.json` (point at the built binary):
 
 ```json
 {
   "mcpServers": {
     "ultima3d": {
-      "command": "python",
-      "args": ["C:/Users/buffb/Desktop/GitHub/Ultima3D/ultima3d/server.py"]
+      "command": "C:/Users/buffb/Desktop/GitHub/Ultima3D/rust/target/debug/ultima3d-server.exe"
     }
   }
 }
 ```
 
+(Use `target/release/ultima3d-server.exe` after `cargo build --release`.)
 The client launches one long-lived Blender worker per server process, so scene, recipe and
-blueprint state persist across tool calls. Edits to the Python files are not picked up by an
-already-running server — restart the MCP server after changing code.
+blueprint state persist across tool calls. Restart the MCP server after changing code.
 
 ## Architecture boundary
 
-The LLM decides *what should exist*; Python measures *what actually happened*. Validation
+The LLM decides *what should exist*; the worker measures *what actually happened*. Validation
 numbers come from `bpy`, never from the model. Refinement is parametric, so a revision is a
 diff against a recipe rather than a rewrite of geometry.
 

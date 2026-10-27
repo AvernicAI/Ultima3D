@@ -1,12 +1,12 @@
 //! Headless tileable texture synthesis (no Photoshop needed).
-//! Mirrors ultima3d/photoshop/textures.py: value-noise fBm on a wrapping
+//! Headless texture synthesis: value-noise fBm on a wrapping
 //! lattice, albedo / roughness / normal trio per preset. Deterministic per
 //! (preset, seed); self-consistent across runs (own SplitMix64 stream, not
 //! CPython's Mersenne Twister — byte equality with Python is not a goal).
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 pub const PRESETS: [&str; 3] = ["stone", "wood_grain", "noise"];
@@ -20,14 +20,16 @@ impl Rng {
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31);
+        let _ = z ^ (z >> 31);
         ((z >> 11) as f64) / ((1u64 << 53) as f64)
     }
 }
 
 fn lattice(n: usize, seed: u64) -> Vec<Vec<f64>> {
     let mut rng = Rng(seed);
-    (0..n).map(|_| (0..n).map(|_| rng.next_f64()).collect()).collect()
+    (0..n)
+        .map(|_| (0..n).map(|_| rng.next_f64()).collect())
+        .collect()
 }
 
 fn noise(latt: &[Vec<f64>], x: f64, y: f64) -> f64 {
@@ -93,7 +95,13 @@ fn normal_strength(preset: &str) -> f64 {
 fn base_freq(preset: &str) -> usize {
     match preset {
         "wood_grain" => 4,
-        _ => if preset == "noise" { 8 } else { 6 },
+        _ => {
+            if preset == "noise" {
+                8
+            } else {
+                6
+            }
+        }
     }
 }
 
@@ -130,9 +138,18 @@ fn write_png(path: &Path, rows: &[Vec<u8>], size: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn make_texture(preset: &str, size: usize, seed: u64, out_dir: &Path, name: Option<&str>) -> Result<Value> {
+pub fn make_texture(
+    preset: &str,
+    size: usize,
+    seed: u64,
+    out_dir: &Path,
+    name: Option<&str>,
+) -> Result<Value> {
     if !PRESETS.contains(&preset) {
-        anyhow::bail!("unknown texture preset {preset:?}; choose from {:?}", PRESETS);
+        anyhow::bail!(
+            "unknown texture preset {preset:?}; choose from {:?}",
+            PRESETS
+        );
     }
     let size = size.clamp(64, 1024);
     std::fs::create_dir_all(out_dir)?;
@@ -157,7 +174,11 @@ pub fn make_texture(preset: &str, size: usize, seed: u64, out_dir: &Path, name: 
             let lo_c = [lo.0 as f64, lo.1 as f64, lo.2 as f64];
             let hi_c = [hi.0 as f64, hi.1 as f64, hi.2 as f64];
             for i in 0..3 {
-                a_row.push((lo_c[i] + (hi_c[i] - lo_c[i]) * v).round().clamp(0.0, 255.0) as u8);
+                a_row.push(
+                    (lo_c[i] + (hi_c[i] - lo_c[i]) * v)
+                        .round()
+                        .clamp(0.0, 255.0) as u8,
+                );
             }
             let g = (255.0 * (0.55 + 0.45 * (1.0 - v))).round() as u8;
             r_row.extend_from_slice(&[g, g, g]);
@@ -174,11 +195,20 @@ pub fn make_texture(preset: &str, size: usize, seed: u64, out_dir: &Path, name: 
     }
 
     let mut files = serde_json::Map::new();
-    for (kind, rows) in [("albedo", &albedo_rows), ("rough", &rough_rows), ("normal", &normal_rows)] {
+    for (kind, rows) in [
+        ("albedo", &albedo_rows),
+        ("rough", &rough_rows),
+        ("normal", &normal_rows),
+    ] {
         let p: PathBuf = out_dir.join(format!("{tag}_{kind}.png"));
         write_png(&p, rows, size)?;
-        files.insert(kind.to_string(), Value::String(p.to_string_lossy().into_owned()));
+        files.insert(
+            kind.to_string(),
+            Value::String(p.to_string_lossy().into_owned()),
+        );
     }
-    Ok(serde_json::json!({"preset": preset, "size": size, "seed": seed,
-                          "tileable": true, "files": files}))
+    Ok(
+        serde_json::json!({"preset": preset, "size": size, "seed": seed,
+                          "tileable": true, "files": files}),
+    )
 }

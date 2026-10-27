@@ -1,7 +1,7 @@
-//! Photoshop CS3 backend. Mirrors ultima3d/photoshop/bridge.py:
-//! portable CS3 registers no COM server, so live control goes through the
-//! ExtendScript TCP bridge (one JSON command per connection, reply before
-//! close). Texture synthesis lives in textures.rs (headless, no Photoshop).
+//! Photoshop CS3 backend: portable CS3 registers no COM server, so live
+//! control goes through the ExtendScript TCP bridge (one JSON command per
+//! connection, reply before close). Texture synthesis lives in textures.rs
+//! (headless, no Photoshop).
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -33,7 +33,6 @@ pub fn port() -> u16 {
 fn scripts_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or(PathBuf::from("."))
-        .join("ultima3d")
         .join("photoshop")
         .join("scripts")
 }
@@ -57,7 +56,6 @@ pub fn preset_names() -> Vec<String> {
 fn daemon_script() -> PathBuf {
     std::env::current_dir()
         .unwrap_or(PathBuf::from("."))
-        .join("ultima3d")
         .join("photoshop")
         .join("daemon")
         .join("ultima3d_bridge.jsx")
@@ -65,11 +63,7 @@ fn daemon_script() -> PathBuf {
 
 /// Quick connect test: is the bridge script running inside Photoshop?
 pub fn live(timeout: Duration) -> bool {
-    TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port()).parse().unwrap(),
-        timeout,
-    )
-    .is_ok()
+    TcpStream::connect_timeout(&format!("127.0.0.1:{}", port()).parse().unwrap(), timeout).is_ok()
 }
 
 /// Run ExtendScript in the open Photoshop via the bridge; return its reply.
@@ -101,10 +95,13 @@ pub fn call(code: Option<&str>, op: &str, timeout: Duration) -> Result<Value> {
             daemon_script().display()
         );
     }
-    let resp: Value =
-        serde_json::from_str(&raw).map_err(|_| anyhow!("unreadable reply from the Photoshop bridge: {raw:.120}"))?;
+    let resp: Value = serde_json::from_str(&raw)
+        .map_err(|_| anyhow!("unreadable reply from the Photoshop bridge: {raw:.120}"))?;
     if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-        let err = resp.get("error").and_then(Value::as_str).unwrap_or("unknown");
+        let err = resp
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         anyhow::bail!("ExtendScript error: {err}");
     }
     Ok(resp)
@@ -132,7 +129,11 @@ pub fn build_create(width: i64, height: i64, background: &str, name: &str) -> Re
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         .collect();
-    let safe = if safe.is_empty() { "ultima3d".to_string() } else { safe };
+    let safe = if safe.is_empty() {
+        "ultima3d".to_string()
+    } else {
+        safe
+    };
     Ok(format!(
         "var d = app.documents.add({w}, {h}, 72, \"{safe}\", NewDocumentMode.RGB, {fill}); \
          \"created \" + d.name + \" \" + d.width + \"x\" + d.height",
@@ -145,17 +146,31 @@ pub fn build_create(width: i64, height: i64, background: &str, name: &str) -> Re
 pub fn run_script(name_or_code: &str) -> Result<Value> {
     let exe = exe_path();
     if !exe.is_file() {
-        anyhow::bail!("Photoshop.exe not found at {}; set ULTIMA3D_PHOTOSHOP", exe.display());
+        anyhow::bail!(
+            "Photoshop.exe not found at {}; set ULTIMA3D_PHOTOSHOP",
+            exe.display()
+        );
     }
     let candidate = scripts_dir().join(format!("{name_or_code}.jsx"));
     let (code, source) = if candidate.is_file() {
         let code = std::fs::read_to_string(&candidate)?;
-        (code, format!("preset:{}", candidate.file_stem().and_then(|s| s.to_str()).unwrap_or("?")))
+        (
+            code,
+            format!(
+                "preset:{}",
+                candidate
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+            ),
+        )
     } else {
         (name_or_code.to_string(), "inline".to_string())
     };
     if !code.contains("app.") && !code.contains("activeDocument") {
-        anyhow::bail!("refusing to launch Photoshop with code that never touches app/activeDocument");
+        anyhow::bail!(
+            "refusing to launch Photoshop with code that never touches app/activeDocument"
+        );
     }
     let staged = std::env::temp_dir().join(format!(
         "ultima3d_{}_{}.jsx",

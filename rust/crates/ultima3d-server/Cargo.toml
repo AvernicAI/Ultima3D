@@ -1,6 +1,6 @@
 [package]
 name = "ultima3d-server"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [[bin]]
@@ -17,3 +17,5 @@ schemars = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
 png = "0.17"
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"

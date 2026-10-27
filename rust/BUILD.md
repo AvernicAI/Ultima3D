@@ -25,10 +25,17 @@ is the mechanism. MSVCRT (not UCRT) is deliberate: this machine has no
 Then:
 
 ```
-cd rust && cargo build --target x86_64-pc-windows-gnu
-# -> target/x86_64-pc-windows-gnu/debug/ultima3d-server.exe
+cd rust && cargo build --workspace
+# -> target/debug/ultima3d-server.exe + target/debug/ultima3d-tray.exe
+cargo test --workspace   # unit tests + 61-tool parity test (no Blender needed)
 ```
 
-The server resolves `ultima3d/blender_worker.py` and `output/` from the
-current working directory, exactly like `python -m ultima3d.server`, so run
-it (or point the MCP client) at the repo root.
+On machines with Visual Studio (including GitHub's `windows-latest` runners)
+the default MSVC target just works — the llvm-mingw linker above is only for
+linking the `gnu` target here.
+
+Run the server (or point the MCP client) at the repo root: it resolves
+`blender/worker.py` and `output/` from the current working directory.
+`ULTIMA3D_WORKER` overrides the worker script path, `ULTIMA3D_SERVER`
+tells `ultima3d-tray` which server binary to own (default: the
+`ultima3d-server.exe` sitting next to the tray binary).

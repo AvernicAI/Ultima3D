@@ -2,7 +2,7 @@
 
 Run by the MCP server as:
 
-    blender.exe --background --factory-startup --python ultima3d/blender_worker.py
+    blender.exe --background --factory-startup --python blender/worker.py
 
 Protocol: one JSON request per line on stdin, one JSON response per line on
 stdout. Blender logs go to stderr. A single worker instance serves many
