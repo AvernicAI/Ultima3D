@@ -1,0 +1,8 @@
+# Windows build without VS or MinGW-gcc: llvm-mingw (MSVCRT flavor) provides
+# the linker + sysroot (winget: MartinStorsjo.LLVM-MinGW.MSVCRT; put its
+# bin dir on PATH). rust/.libalias maps rustc's -lgcc/-lgcc_eh onto
+# compiler-rt builtins + libunwind; expose it via the LIBRARY_PATH env var
+# (-L rustflags do not reach the linker reliably; LIBRARY_PATH does):
+#   LIBRARY_PATH=<repo>/rust/.libalias
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-clang"

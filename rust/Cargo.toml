@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/ultima3d-server"]
+resolver = "2"
